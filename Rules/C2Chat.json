@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "_doc": "C2 通讯规则：网络类高置信指标。零误报底线：默认不收通配 TLD（误报源），只收明确 IOC 与明确异常组合；IOC 名单由云端同步工具追加。",
+  "rules": [
+    {
+      "id": "C2_Known_IOC_Domains",
+      "kinds": ["DnsQuery", "NetConnect", "C2Chat"],
+      "contains": [
+        ".top/c2test",
+        "pastebin.com/raw/7x9e",
+        "dga-test-c2.localdomain"
+      ],
+      "action": "block",
+      "score": 10,
+      "severity": 90,
+      "_note": "示例 IOC（结构示例）；生产由 Tools/sync_c2_ioc.py 从云端情报追加"
+    },
+    {
+      "id": "C2_Raw_IP_No_DNS_By_Script",
+      "kinds": ["NetConnect"],
+      "proc_glob": ["?:\\**\\powershell.exe", "?:\\**\\wscript.exe", "?:\\**\\cscript.exe", "?:\\**\\mshta.exe"],
+      "detail_contains": "raw_ip_connect",
+      "action": "log",
+      "score": 10,
+      "severity": 55,
+      "_note": "脚本解释器直连裸 IP（无 DNS）—— 记录+计分，不拦截（运维脚本可能如此），EDR 评分主导"
+    },
+    {
+      "id": "C2_Beacon_Periodic_Small_Upload",
+      "kinds": ["NetConnect"],
+      "action": "log",
+      "score": 5,
+      "severity": 30,
+      "_note": "信标检测由 EDR 时序分析产出 C2Chat 事件后在此匹配，引擎判定为恶意进程的网络直接 KILL"
+    }
+  ]
+}

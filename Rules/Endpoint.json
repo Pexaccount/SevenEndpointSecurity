@@ -1,0 +1,37 @@
+{
+  "version": "1.0",
+  "_doc": "端点规则（Endpoint.sys / Endpoint.json）：外设与端点面。零误报底线：默认只记录不拦截，由策略决定是否升级为 block（企业部署可改）。",
+  "rules": [
+    {
+      "id": "Endpoint_Usb_Storage_Mount",
+      "kinds": ["FileOpen", "FileCreate"],
+      "glob": ["?:\\", "?:\\**"],
+      "detail_contains": "usb_mass_storage",
+      "action": "log",
+      "score": 5,
+      "severity": 25,
+      "_note": "U 盘挂载记录（驱动标记 detail=usb_mass_storage）"
+    },
+    {
+      "id": "Endpoint_RDP_Session_File_Exec",
+      "kinds": ["ProcessCreate"],
+      "detail_contains": "session_type=rdp",
+      "glob": ["?:\\users\\public\\**", "?:\\**\\temp\\**"],
+      "action": "block",
+      "score": 10,
+      "severity": 75,
+      "_note": "RDP 会话从公共/临时目录拉起可执行体 —— 高置信横向投递"
+    },
+    {
+      "id": "Endpoint_Removable_Persistence_Write",
+      "kinds": ["FileWrite", "FileDrop"],
+      "detail_contains": "removable_volume",
+      "glob": ["?:\\**\\*.exe", "?:\\**\\*.dll", "?:\\**\\*.vbs", "?:\\**\\*.js", "?:\\**\\*.ps1", "?:\\**\\*.bat"],
+      "except_glob": ["*sevenendpointsecurity*"],
+      "action": "log",
+      "score": 5,
+      "severity": 40,
+      "_note": "可移动介质写可执行体记录（autorun 蠕虫行为面），EDR 评分主导"
+    }
+  ]
+}

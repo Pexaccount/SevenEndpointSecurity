@@ -1,0 +1,72 @@
+{
+  "version": "1.0",
+  "_doc": "进程规则：进程创建/打开/终止。零误报底线：系统进程与签名白名单一律由 White.json 短路；本文件只收高置信恶意进程指标。",
+  "rules": [
+    {
+      "id": "Proc_Known_Hacker_Tooling",
+      "kinds": ["ProcessCreate"],
+      "proc_glob": ["**"],
+      "glob": [
+        "?:\\**\\mimikatz*.exe",
+        "?:\\**\\procdump*.exe",
+        "?:\\**\\psexec*.exe",
+        "?:\\**\\quarks*pwdump*.exe",
+        "?:\\**\\secretsdump*.exe",
+        "?:\\**\\cobaltstrike*.exe",
+        "?:\\**\\beacon.exe",
+        "?:\\**\\nc.exe",
+        "?:\\**\\ncat.exe",
+        "?:\\**\\plink.exe"
+      ],
+      "except_glob": ["?:\\program files\\**", "?:\\program files (x86)\\**", "*sevenendpointsecurity*"],
+      "action": "block",
+      "score": 10,
+      "severity": 90,
+      "_note": "凭据窃取/横向移动工具按文件名定位，路径排除受信目录"
+    },
+    {
+      "id": "Proc_Lolbin_Suspicious_Launch",
+      "kinds": ["ProcessCreate"],
+      "glob": [
+        "?:\\windows\\system32\\mshta.exe",
+        "?:\\windows\\syswow64\\mshta.exe"
+      ],
+      "proc_glob": ["?:\\**\\winword.exe", "?:\\**\\excel.exe", "?:\\**\\powerpnt.exe", "?:\\**\\wscript.exe", "?:\\**\\outlook.exe"],
+      "except_glob": ["?:\\program files\\**", "?:\\program files (x86)\\**"],
+      "action": "block",
+      "score": 10,
+      "severity": 85,
+      "_note": "Office/脚本宿主拉起 mshta —— 宏攻击链高置信特征"
+    },
+    {
+      "id": "Proc_Powershell_From_Office",
+      "kinds": ["ProcessCreate"],
+      "glob": ["?:\\**\\powershell.exe", "?:\\**\\cmd.exe", "?:\\**\\wscript.exe"],
+      "proc_glob": ["?:\\**\\winword.exe", "?:\\**\\excel.exe", "?:\\**\\powerpnt.exe", "?:\\**\\outlook.exe"],
+      "action": "block",
+      "score": 10,
+      "severity": 85,
+      "_note": "Office 直接拉起解释器 —— 无正常办公场景"
+    },
+    {
+      "id": "Proc_Open_Lsass_Handle",
+      "kinds": ["ProcessOpen"],
+      "glob": ["?:\\windows\\system32\\lsass.exe"],
+      "proc_glob": [],
+      "except_glob": [
+        "?:\\windows\\system32\\lsass.exe",
+        "?:\\windows\\system32\\csrss.exe",
+        "?:\\windows\\system32\\winlogon.exe",
+        "?:\\windows\\system32\\services.exe",
+        "?:\\windows\\system32\\svchost.exe",
+        "?:\\windows\\system32\\smss.exe",
+        "?:\\windows\\system32\\wininit.exe",
+        "*sevenhips*", "*sevenedr*", "*sevenmain*", "*sevenendpointsecurity*"
+      ],
+      "action": "block",
+      "score": 10,
+      "severity": 90,
+      "_note": "非系统组件申请 lsass 句柄 = 凭据转储前奏；系统组件与本产品排除"
+    }
+  ]
+}

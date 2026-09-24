@@ -1,0 +1,44 @@
+{
+  "version": "1.0",
+  "_doc": "行为规则（Watch.sys / Activity）：跨进程注入、内存威胁等行为级指标。零误报底线：注入规则必须同时满足主体+目标双约束，白名单先行。",
+  "rules": [
+    {
+      "id": "Act_Inject_Into_System_Process",
+      "kinds": ["ProcessInject"],
+      "glob": [
+        "?:\\windows\\system32\\lsass.exe",
+        "?:\\windows\\system32\\csrss.exe",
+        "?:\\windows\\system32\\winlogon.exe",
+        "?:\\windows\\system32\\services.exe",
+        "?:\\windows\\explorer.exe",
+        "?:\\windows\\system32\\svchost.exe"
+      ],
+      "except_glob": [
+        "?:\\windows\\system32\\*",
+        "?:\\windows\\syswow64\\*",
+        "*sevenhips*", "*sevenedr*", "*sevenmain*", "*sevenendpointsecurity*"
+      ],
+      "action": "block",
+      "score": 10,
+      "severity": 95,
+      "_note": "未在排除表的进程向系统核心进程注入 —— 高置信。注意：注入规则误报极高（Files.txt），所以仅收此单条，其余注入行为走 EDR 评分"
+    },
+    {
+      "id": "Act_Mem_Threat_Active",
+      "kinds": ["MemThreat"],
+      "action": "block",
+      "score": 10,
+      "severity": 95,
+      "_note": "运行中进程内存命中威胁（引擎/驱动报告）—— 拦截并阻止再启动，此规则允许 KILL 升级"
+    },
+    {
+      "id": "Act_Debug_Instrumentation_Abuse",
+      "kinds": ["ProcessOpen"],
+      "glob": ["?:\\windows\\system32\\lsass.exe", "?:\\windows\\system32\\winlogon.exe"],
+      "action": "log",
+      "score": 5,
+      "severity": 40,
+      "_note": "记录敏感进程调试口访问，供 EDR 评分（不拦截，避免调试器/合法工具误报）"
+    }
+  ]
+}

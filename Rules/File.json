@@ -1,0 +1,66 @@
+{
+  "version": "1.0",
+  "_doc": "文件规则：创建/写入/修改/删除/释放。零误报底线：只收高置信勒索/破坏指标，且全部带排除约束。glob 语义：**跨目录、*单层、?单字符。",
+  "rules": [
+    {
+      "id": "File_Ransom_Encrypt_Ext_Spike",
+      "kinds": ["FileWrite", "FileCreate"],
+      "glob": ["?:\\**\\*.lockbit", "?:\\**\\*.locky", "?:\\**\\*.cerber", "?:\\**\\*.wncry", "?:\\**\\*.onion", "?:\\**\\*.encrypted", "?:\\**\\*.crypt"],
+      "action": "block",
+      "score": 10,
+      "severity": 95,
+      "_note": "勒索家族标志性扩展名 —— 高置信"
+    },
+    {
+      "id": "File_Drop_To_Startup",
+      "kinds": ["FileDrop", "FileCreate"],
+      "glob": ["?:\\users\\*\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\startup\\**"],
+      "proc_glob": ["?:\\windows\\explorer.exe", "?:\\**\\cmd.exe", "?:\\**\\powershell.exe", "?:\\**\\wscript.exe", "?:\\**\\mshta.exe", "?:\\**\\rundll32.exe"],
+      "except_glob": ["?:\\program files\\**", "?:\\program files (x86)\\**", "*sevenendpointsecurity*", "*sevenmain*", "*sevenhips*", "*sevenedr*"],
+      "action": "block",
+      "score": 10,
+      "severity": 80,
+      "_note": "解释器/命令行向启动项释放文件 —— 经典持久化"
+    },
+    {
+      "id": "File_Drop_To_Schtask_Location",
+      "kinds": ["FileDrop", "FileCreate"],
+      "glob": ["?:\\windows\\system32\\tasks\\**"],
+      "proc_glob": ["?:\\**\\cmd.exe", "?:\\**\\powershell.exe", "?:\\**\\wscript.exe", "?:\\**\\cscript.exe", "?:\\**\\mshta.exe"],
+      "except_glob": ["?:\\program files\\**", "?:\\program files (x86)\\**", "*sevenendpointsecurity*"],
+      "action": "block",
+      "score": 10,
+      "severity": 80,
+      "_note": "脚本解释器直接写计划任务文件 —— 常规软件走 schtasks.exe"
+    },
+    {
+      "id": "File_Delete_Backup_Shadow",
+      "kinds": ["FileDelete"],
+      "glob": ["?:\\windows\\system32\\config\\**", "?:\\**\\$recycle.bin\\**"],
+      "proc_glob": ["?:\\**\\vssadmin.exe", "?:\\**\\wbadmin.exe", "?:\\**\\bcdedit.exe"],
+      "action": "block",
+      "score": 10,
+      "severity": 90,
+      "_note": "勒索前兆：删卷影/备份配置（vssadmin delete shadows 等由驱动捕获删除动作）"
+    },
+    {
+      "id": "File_Write_Into_System32_By_Script",
+      "kinds": ["FileWrite", "FileDrop"],
+      "glob": ["?:\\windows\\system32\\**\\*.exe", "?:\\windows\\system32\\**\\*.dll", "?:\\windows\\syswow64\\**\\*.exe", "?:\\windows\\syswow64\\**\\*.dll"],
+      "proc_glob": ["?:\\**\\cmd.exe", "?:\\**\\powershell.exe", "?:\\**\\wscript.exe", "?:\\**\\cscript.exe", "?:\\**\\mshta.exe", "?:\\**\\rundll32.exe"],
+      "except_glob": ["*sevenendpointsecurity*", "*sevenhips*", "*sevenedr*", "*sevenmain*", "*drvinstall*"],
+      "action": "block",
+      "score": 10,
+      "severity": 85,
+      "_note": "解释器向 System32 释放可执行体 —— 高置信恶意"
+    },
+    {
+      "id": "File_Log_All_Drops",
+      "kinds": ["FileDrop"],
+      "action": "log",
+      "score": 5,
+      "severity": 30,
+      "_note": "EDR 评分来源之一：所有落地事件记录（不拦截）"
+    }
+  ]
+}

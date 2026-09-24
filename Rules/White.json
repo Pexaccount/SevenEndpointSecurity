@@ -1,0 +1,36 @@
+{
+  "version": "1.0",
+  "_doc": "白名单（最高优先级，命中即 ALLOW 短路一切规则）。零误报的核心防线。规则引擎按文件名 White.json 自动识别。 upkeep：系统组件、受信厂商目录、本产品自身。",
+  "rules": [
+    {
+      "id": "White_Windows_Tree",
+      "glob": ["?:\\windows\\**"],
+      "action": "allow",
+      "_note": "整个 Windows 目录（驱动与系统组件均在其中）。注入进系统进程的第三方仍会被 Activity 双重约束拦住"
+    },
+    {
+      "id": "White_Program_Files",
+      "glob": ["?:\\program files\\**", "?:\\program files (x86)\\**"],
+      "action": "allow",
+      "_note": "受信安装目录；伪装路径（如 C:\\Program Files\\x.exe 由恶意进程创建）由 File 规则的主体约束互补拦截"
+    },
+    {
+      "id": "White_Ses_Product_Tree",
+      "glob": ["**\\sevenendpointsecurity\\**", "**\\sevenhips\\**", "**\\sevenedr\\**", "**\\sevenmain\\**", "**\\drvinstall\\**", "**\\enginers\\**", "**\\engine\\**"],
+      "action": "allow",
+      "_note": "产品自身组件（自我保护由 ProcessProtect.sys 兜底）"
+    },
+    {
+      "id": "White_Common_Runtimes",
+      "glob": [
+        "?:\\windows\\system32\\conhost.exe",
+        "?:\\windows\\system32\\cmd.exe",
+        "?:\\windows\\system32\\windowspowershell\\**\\powershell.exe",
+        "?:\\programdata\\microsoft\\windows defender\\**\\mpcmdrun.exe"
+      ],
+      "kinds": ["ProcessCreate", "ProcessOpen"],
+      "action": "allow",
+      "_note": "系统解释器本身的创建/打开（其子进程行为仍受 File/Process 规则约束）"
+    }
+  ]
+}
