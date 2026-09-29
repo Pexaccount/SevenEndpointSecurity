@@ -10497,12 +10497,16 @@ def _run_etw_worker_mode():
         """返回 (props dict, event_name) — TDH解析顶层属性。"""
         size = c_ulong(0)
         # 第一次调用只查询所需缓冲大小: 返回122(INSUFFICIENT_BUFFER)+size是预期行为, 不能当失败
-        tdh.TdhGetEventInformation(rec_ptr, 0, None, None, byref(size))
+        rc1 = tdh.TdhGetEventInformation(rec_ptr, 0, None, None, byref(size))
         if size.value == 0 or size.value > 1048576:
+            if _dbg_n[0] <= 100:
+                _out({'type': 'etw_status', 'msg': f'TDH1 rc={rc1} size={size.value}'})
             return {}, ''
         info = create_string_buffer(size.value)
         rc = tdh.TdhGetEventInformation(rec_ptr, 0, None, info, byref(size))
         if rc != 0:
+            if _dbg_n[0] <= 200:
+                _out({'type': 'etw_status', 'msg': f'TDH2 rc={rc} size={size.value}'})
             return {}, ''
         # TRACE_EVENT_INFO 文档布局(x64): EventNameOffset@44 EventNameSize@48
         # PropertyCount@60 TopLevelPropertyCount@64 Flags@68 EventPropertyInfoArray@72(每项8B)
@@ -10709,6 +10713,7 @@ def _run_etw_worker_mode():
 
     def _handle_record(rec):
         try:
+            _dbg_n[0] += 1
             hdr = rec.contents.EventHeader
             pid = hdr.ProcessId
             if pid in (0, _SELF_PID):
@@ -10717,6 +10722,8 @@ def _run_etw_worker_mode():
             if not _rate_ok():
                 return
             props, ev_name = _event_props(rec)
+            if props:
+                _dbg_n[1] += 1
             if not props and not ev_name:
                 return
             ev_name_l = (ev_name or '').lower()
@@ -10821,6 +10828,12 @@ def _run_etw_worker_mode():
         except Exception:
             return
 
+    _dbg_n = [0, 0]
+    def _dbg_report():
+        while True:
+            time.sleep(5)
+            _out({'type': 'etw_status', 'msg': f'DBG events={_dbg_n[0]} props={_dbg_n[1]}'})
+    threading.Thread(target=_dbg_report, daemon=True).start()
     _callback_ref = _ev_rec_cb(_handle_record)  # 防GC
 
     # 启动会话

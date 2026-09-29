@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "_doc": "端点规则（Endpoint.sys / Endpoint.json）：外设与端点面。零误报底线：默认只记录不拦截，由策略决定是否升级为 block（企业部署可改）。",
+  "_doc": "端点规则（纯用户态）：外设与端点面。零误报底线：默认只记录不拦截，由策略决定是否升级为 block（企业部署可改）。usb_mass_storage/session_type=rdp/removable_volume 为预留标记位, 当前用户态遥测暂不产生这些标记, 命中规则待外设监控模块接入后生效。",
   "rules": [
     {
       "id": "Endpoint_Usb_Storage_Mount",
@@ -10,7 +10,7 @@
       "action": "log",
       "score": 5,
       "severity": 25,
-      "_note": "U 盘挂载记录（驱动标记 detail=usb_mass_storage）"
+      "_note": "U 盘挂载记录（预留标记 detail=usb_mass_storage, 待用户态外设监控接入）"
     },
     {
       "id": "Endpoint_RDP_Session_File_Exec",

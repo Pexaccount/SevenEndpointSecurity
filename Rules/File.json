@@ -15,12 +15,12 @@
       "id": "File_Drop_To_Startup",
       "kinds": ["FileDrop", "FileCreate"],
       "glob": ["?:\\users\\*\\appdata\\roaming\\microsoft\\windows\\start menu\\programs\\startup\\**"],
-      "proc_glob": ["?:\\windows\\explorer.exe", "?:\\**\\cmd.exe", "?:\\**\\powershell.exe", "?:\\**\\wscript.exe", "?:\\**\\mshta.exe", "?:\\**\\rundll32.exe"],
+      "proc_glob": ["?:\\**\\cmd.exe", "?:\\**\\powershell.exe", "?:\\**\\wscript.exe", "?:\\**\\mshta.exe", "?:\\**\\rundll32.exe", "?:\\**\\cscript.exe"],
       "except_glob": ["?:\\program files\\**", "?:\\program files (x86)\\**", "*sevenendpointsecurity*", "*sevenmain*", "*sevenhips*", "*sevenedr*"],
       "action": "block",
       "score": 10,
       "severity": 80,
-      "_note": "解释器/命令行向启动项释放文件 —— 经典持久化"
+      "_note": "解释器/命令行向启动项释放文件 —— 经典持久化。explorer 已移除: 用户手动拖放快捷方式属正常操作(误报), 引导型手动落盘由 EDR 评分+内容扫描兜底"
     },
     {
       "id": "File_Drop_To_Schtask_Location",

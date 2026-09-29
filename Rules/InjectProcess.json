@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "_doc": "注入规则（Files.txt：误报极高，所以默认只收以下两组零争议组合；其余注入一律由 EDR 评分观察）。正常进程约束见 except；White.json 命中先行放行。",
+  "_doc": "注入规则（纯用户态对齐：误报极高，所以默认只收以下两组零争议组合；其余注入一律由 EDR 评分观察）。ProcessInject 类事件由用户态 MemoryGuard(句柄表注入检测)产生并执行, ETW worker 不加载该 kind。正常进程约束见 except；White.json 命中先行放行。",
   "rules": [
     {
       "id": "Inject_Shellcode_Loader_To_Remote",
@@ -20,7 +20,7 @@
       "action": "block",
       "score": 10,
       "severity": 100,
-      "_note": "任何人注入本产品进程 —— 直接拦截并通知"
+      "_note": "任何人注入本产品进程 —— 直接拦截并通知。用户态执行方: MemoryGuard + 主进程注入自检"
     }
   ]
 }

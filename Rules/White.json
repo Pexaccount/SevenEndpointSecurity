@@ -5,32 +5,35 @@
     {
       "id": "White_Windows_Tree",
       "glob": ["?:\\windows\\**"],
+      "kinds": ["FileCreate", "FileOpen", "FileWrite", "FileModify", "FileDelete", "FileDrop",
+                "RegistrySet", "RegistryDelete", "NetConnect", "DnsQuery"],
       "action": "allow",
-      "_note": "整个 Windows 目录（驱动与系统组件均在其中）。注入进系统进程的第三方仍会被 Activity 双重约束拦住"
+      "_note": "整个 Windows 目录（驱动与系统组件均在其中）。必须排除进程类 kind：否则 ProcessCreate/ProcessOpen 被白名单短路，Office宏链(Proc_Powershell_From_Office)、LSASS句柄、注入规则全部失效（银狐宏链检测缝隙，2026-09 全量测试发现）"
     },
     {
       "id": "White_Program_Files",
       "glob": ["?:\\program files\\**", "?:\\program files (x86)\\**"],
+      "kinds": ["FileCreate", "FileOpen", "FileWrite", "FileModify", "FileDelete", "FileDrop",
+                "RegistrySet", "RegistryDelete", "NetConnect", "DnsQuery"],
       "action": "allow",
-      "_note": "受信安装目录；伪装路径（如 C:\\Program Files\\x.exe 由恶意进程创建）由 File 规则的主体约束互补拦截"
+      "_note": "受信安装目录；伪装路径（如 C:\\Program Files\\x.exe 由恶意进程创建）由 File 规则的主体约束互补拦截。进程类 kind 排除，理由同 Windows 树"
     },
     {
       "id": "White_Ses_Product_Tree",
       "glob": ["**\\sevenendpointsecurity\\**", "**\\sevenhips\\**", "**\\sevenedr\\**", "**\\sevenmain\\**", "**\\drvinstall\\**", "**\\enginers\\**", "**\\engine\\**"],
+      "kinds": ["FileCreate", "FileOpen", "FileWrite", "FileModify", "FileDelete", "FileDrop",
+                "RegistrySet", "RegistryDelete", "NetConnect", "DnsQuery"],
       "action": "allow",
-      "_note": "产品自身组件（自我保护由 ProcessProtect.sys 兜底）"
+      "_note": "产品自身组件（自我保护由用户态存活监控+链终止兜底）。进程类 kind 排除：否则产品文件保护规则的进程类约束被短路"
     },
     {
       "id": "White_Common_Runtimes",
       "glob": [
-        "?:\\windows\\system32\\conhost.exe",
-        "?:\\windows\\system32\\cmd.exe",
-        "?:\\windows\\system32\\windowspowershell\\**\\powershell.exe",
         "?:\\programdata\\microsoft\\windows defender\\**\\mpcmdrun.exe"
       ],
       "kinds": ["ProcessCreate", "ProcessOpen"],
       "action": "allow",
-      "_note": "系统解释器本身的创建/打开（其子进程行为仍受 File/Process 规则约束）"
+      "_note": "2026-09 全量测试修正: 原先包含系统 cmd/powershell/conhost 子进程路径, 导致 Proc_Powershell_From_Office(Office宏链)被白名单短路而永远无法触发——已移除。这些解释器的创建事件无通用block规则, 不会引入误报; 需要主体约束的规则(Office宏链)得以生效"
     }
   ]
 }

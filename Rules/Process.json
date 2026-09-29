@@ -4,8 +4,12 @@
   "rules": [
     {
       "id": "Proc_Known_Hacker_Tooling",
-      "kinds": ["ProcessCreate"],
-      "proc_glob": ["**"],
+      "kinds": [
+        "ProcessCreate"
+      ],
+      "proc_glob": [
+        "**"
+      ],
       "glob": [
         "?:\\**\\mimikatz*.exe",
         "?:\\**\\procdump*.exe",
@@ -18,7 +22,11 @@
         "?:\\**\\ncat.exe",
         "?:\\**\\plink.exe"
       ],
-      "except_glob": ["?:\\program files\\**", "?:\\program files (x86)\\**", "*sevenendpointsecurity*"],
+      "except_glob": [
+        "?:\\program files\\**",
+        "?:\\program files (x86)\\**",
+        "*sevenendpointsecurity*"
+      ],
       "action": "block",
       "score": 10,
       "severity": 90,
@@ -26,23 +34,47 @@
     },
     {
       "id": "Proc_Lolbin_Suspicious_Launch",
-      "kinds": ["ProcessCreate"],
+      "kinds": [
+        "ProcessCreate"
+      ],
       "glob": [
         "?:\\windows\\system32\\mshta.exe",
         "?:\\windows\\syswow64\\mshta.exe"
       ],
-      "proc_glob": ["?:\\**\\winword.exe", "?:\\**\\excel.exe", "?:\\**\\powerpnt.exe", "?:\\**\\wscript.exe", "?:\\**\\outlook.exe"],
-      "except_glob": ["?:\\program files\\**", "?:\\program files (x86)\\**"],
+      "proc_glob": [
+        "?:\\**\\winword.exe",
+        "?:\\**\\excel.exe",
+        "?:\\**\\powerpnt.exe",
+        "?:\\**\\wscript.exe",
+        "?:\\**\\outlook.exe"
+      ],
+      "except_glob": [
+        "*sevenendpointsecurity*",
+        "*sevenmain*",
+        "*sevenhips*",
+        "*sevenedr*"
+      ],
       "action": "block",
       "score": 10,
       "severity": 85,
-      "_note": "Office/脚本宿主拉起 mshta —— 宏攻击链高置信特征"
+      "_note": "Office/脚本宿主拉起 mshta —— 宏攻击链高置信特征。2026-09 全量测试修正: 移除 program files except(否则 except 匹配到 Office 父进程路径, 规则永不触发); except 仅保留产品自身"
     },
     {
       "id": "Proc_Powershell_From_Office",
-      "kinds": ["ProcessCreate"],
-      "glob": ["?:\\**\\powershell.exe", "?:\\**\\cmd.exe", "?:\\**\\wscript.exe"],
-      "proc_glob": ["?:\\**\\winword.exe", "?:\\**\\excel.exe", "?:\\**\\powerpnt.exe", "?:\\**\\outlook.exe"],
+      "kinds": [
+        "ProcessCreate"
+      ],
+      "glob": [
+        "?:\\**\\powershell.exe",
+        "?:\\**\\cmd.exe",
+        "?:\\**\\wscript.exe"
+      ],
+      "proc_glob": [
+        "?:\\**\\winword.exe",
+        "?:\\**\\excel.exe",
+        "?:\\**\\powerpnt.exe",
+        "?:\\**\\outlook.exe"
+      ],
       "action": "block",
       "score": 10,
       "severity": 85,
@@ -50,8 +82,12 @@
     },
     {
       "id": "Proc_Open_Lsass_Handle",
-      "kinds": ["ProcessOpen"],
-      "glob": ["?:\\windows\\system32\\lsass.exe"],
+      "kinds": [
+        "ProcessOpen"
+      ],
+      "glob": [
+        "?:\\windows\\system32\\lsass.exe"
+      ],
       "proc_glob": [],
       "except_glob": [
         "?:\\windows\\system32\\lsass.exe",
@@ -61,7 +97,10 @@
         "?:\\windows\\system32\\svchost.exe",
         "?:\\windows\\system32\\smss.exe",
         "?:\\windows\\system32\\wininit.exe",
-        "*sevenhips*", "*sevenedr*", "*sevenmain*", "*sevenendpointsecurity*"
+        "*sevenhips*",
+        "*sevenedr*",
+        "*sevenmain*",
+        "*sevenendpointsecurity*"
       ],
       "action": "block",
       "score": 10,

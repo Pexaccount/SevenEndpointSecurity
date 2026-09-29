@@ -1,16 +1,16 @@
 {
   "version": "1.0",
-  "_doc": "保护规则（Protect.sys / SystemProtect.sys 共用，用户态内核同语义）：受保护对象清单。自我保护 + 系统关键位置。任何人触碰 => 拦截并通知（本产品自身操作经 ProcessProtect.sys PID 登记豁免）。",
+  "_doc": "保护规则（纯用户态）：受保护对象清单。自我保护 + 系统关键位置。任何人触碰 => 拦截并通知。产品无内核驱动，全部由用户态 ETW worker + 端点命令行规则(av_tamper)执行。",
   "rules": [
     {
       "id": "Protect_Ses_Product_Files",
-      "kinds": ["FileDelete", "FileWrite", "FileModify", "ProcessOpen", "ProcessTerminate"],
+      "kinds": ["FileDelete", "FileWrite", "FileModify"],
       "glob": ["**\\sevenendpointsecurity\\**", "**\\sevenhips\\**", "**\\sevenedr\\**", "**\\sevenmain\\**", "**\\drvinstall\\**", "**\\engine\\**", "**\\enginers\\**", "**\\icon\\**"],
       "except_glob": ["*sevenhips*", "*sevenedr*", "*sevenmain*", "*drvinstall*", "*sevenengine*"],
       "action": "block",
       "score": 10,
       "severity": 100,
-      "_note": "防卸载/防篡改：非本产品进程触碰产品文件/进程 => 拦截"
+      "_note": "防卸载/防篡改：非本产品进程触碰产品文件 => 拦截。用户态执行；进程级自我保护由主进程存活监控+链终止兜底"
     },
     {
       "id": "Protect_System_Critical_Keys",
@@ -33,13 +33,13 @@
     },
     {
       "id": "Protect_Services_Tamper",
-      "kinds": ["ServiceOp"],
+      "kinds": ["RegistryDelete", "RegistrySet"],
+      "glob": ["**\\currentcontrolset\\services\\seven*"],
       "contains": ["sevenprocessprotect", "sevenfile", "sevenendpoint", "sevenwatch", "sevensystemprotect", "sevenedr", "sevenprotect"],
-      "except_glob": ["*sevenmain*", "*drvinstall*", "*sevenhips*", "*sevenedr*"],
       "action": "block",
       "score": 10,
       "severity": 100,
-      "_note": "停/删本产品驱动服务 => 拦截"
+      "_note": "外部篡改/删除本产品服务注册表键 => 拦截。用户态转换: 原ServiceOp为内核遗留kind(用户态worker不支持), 现由注册表遥测执行; 命令行路径(sc stop/delete/config seven*)由端点 av_tamper +20 兜底"
     }
   ]
 }

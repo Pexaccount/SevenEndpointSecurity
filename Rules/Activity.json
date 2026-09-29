@@ -1,6 +1,6 @@
 {
   "version": "1.0",
-  "_doc": "行为规则（Watch.sys / Activity）：跨进程注入、内存威胁等行为级指标。零误报底线：注入规则必须同时满足主体+目标双约束，白名单先行。",
+  "_doc": "行为规则（纯用户态对齐）：跨进程注入、内存威胁等行为级指标。产品无内核驱动, 本文件的 ProcessInject/MemThreat/ProcessOpen 类事件由用户态 MemoryGuard(句柄表轮询: LSASS访问/注入检测, SevenEndPoint.py)产生并执行, ETW worker 不加载这几类 kind。零误报底线：注入规则必须同时满足主体+目标双约束。",
   "rules": [
     {
       "id": "Act_Inject_Into_System_Process",
@@ -21,7 +21,7 @@
       "action": "block",
       "score": 10,
       "severity": 95,
-      "_note": "未在排除表的进程向系统核心进程注入 —— 高置信。注意：注入规则误报极高（Files.txt），所以仅收此单条，其余注入行为走 EDR 评分"
+      "_note": "未在排除表的进程向系统核心进程注入 —— 高置信。用户态执行方: MemoryGuard 句柄表注入检测(lsass_access +15 / injection 计分)。注意：注入规则误报极高，所以仅收此单条，其余注入行为走 EDR 评分"
     },
     {
       "id": "Act_Mem_Threat_Active",
@@ -29,7 +29,7 @@
       "action": "block",
       "score": 10,
       "severity": 95,
-      "_note": "运行中进程内存命中威胁（引擎/驱动报告）—— 拦截并阻止再启动，此规则允许 KILL 升级"
+      "_note": "运行中进程内存命中威胁（用户态 MemoryGuard 报告）—— 拦截并阻止再启动，此规则允许 KILL 升级"
     },
     {
       "id": "Act_Debug_Instrumentation_Abuse",
@@ -38,7 +38,7 @@
       "action": "log",
       "score": 5,
       "severity": 40,
-      "_note": "记录敏感进程调试口访问，供 EDR 评分（不拦截，避免调试器/合法工具误报）"
+      "_note": "记录敏感进程调试口访问，供 EDR 评分（不拦截，避免调试器/合法工具误报）。用户态执行方: MemoryGuard 敏感句柄打开检测"
     }
   ]
 }
