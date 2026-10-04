@@ -14,7 +14,7 @@
 ## 架构说明
 
 由Python编写，用户态杀毒软件，未使用不稳定的驱动内核。
-本杀毒软件的拦截构建分为 **EDR** 和 **Endpoint**，虽然不能和 PYAS、XiguaSecurity 对标。
+本杀毒软件的拦截构建分为 **EDR** 和 **Endpoint**，虽然不能和 PYAS、XIGUASecurity 对标。
 
 - 动态分析和静态拦截
 - 单 EDR 架构为初版时使用  
