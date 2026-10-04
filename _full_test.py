@@ -15,6 +15,8 @@ def load_rules():
     for fn in os.listdir(os.path.join(ROOT, 'Rules')):
         if not fn.endswith('.json'):
             continue
+        if fn.upper().startswith('IOA-'):
+            continue   # IOA-*.json 是关联规则引擎(Rules/IOA-*, signals/window/points), 不走简易规则求值器(与生产一致)
         d = json.load(open(os.path.join(ROOT, 'Rules', fn), encoding='utf-8'))
         for r in d.get('rules', []):
             (whites if r.get('action') == 'allow' else rules).append(r)
@@ -22,7 +24,7 @@ def load_rules():
 RULES, WHITES = load_rules()
 
 # --- AST 提取端点规则 ---
-PTS, CMD_PATTERNS, PROXY_DLLS, REG_PERSIST_KEYS, EDR_EXEMPT, FILE_OP_EXEMPT, THRESHOLD = None, None, None, None, None, None, 70
+PTS, CMD_PATTERNS, PROXY_DLLS, REG_PERSIST_KEYS, EDR_EXEMPT, THRESHOLD = None, None, None, None, None, 70
 for node in ast.walk(tree):
     if not isinstance(node, ast.Assign):
         continue
@@ -37,11 +39,9 @@ for node in ast.walk(tree):
         REG_PERSIST_KEYS = tuple(e.value for e in node.value.elts)
     elif tid == 'EDR_EXEMPT_NAMES':
         EDR_EXEMPT = {e.value for e in node.value.elts}
-    elif tid == '_FILE_OP_EXEMPT_NAMES':
-        FILE_OP_EXEMPT = {e.value for e in node.value.elts}
     elif tid == 'EDR_SCORE_THRESHOLD':
         THRESHOLD = node.value.value
-assert all(x is not None for x in (PTS, CMD_PATTERNS, PROXY_DLLS, REG_PERSIST_KEYS, EDR_EXEMPT, FILE_OP_EXEMPT)), '规则提取失败'
+assert all(x is not None for x in (PTS, CMD_PATTERNS, PROXY_DLLS, REG_PERSIST_KEYS, EDR_EXEMPT)), '规则提取失败'
 
 # ================= 2. 忠实求值器(语义对齐 _run_etw_worker_mode) =================
 SUPPORTED_KINDS = {'processcreate', 'processexit', 'imageload', 'filecreate', 'fileopen', 'filewrite',
@@ -148,16 +148,94 @@ def proxy_dll_hit(path):
     p = path.lower().replace('/', '\\')
     return os.path.basename(p) in PROXY_DLLS and any(d in p for d in SUSP_DIRS)
 
-FP_SUSP_DIRS = ('\\temp\\', '\\tmp\\', '\\users\\public\\', '\\downloads\\', '\\appdata\\roaming\\', '\\programdata\\')
-def fp_exempt(proc_name, proc_path):
-    """与生产 _show_dialog 豁免逻辑一致: 名单进程 + 非落毒高发目录"""
-    pn = (proc_name or '').lower()
-    pp = (proc_path or '').lower().replace('/', '\\')
-    if pn in FILE_OP_EXEMPT:
-        if pp:
-            return not any(d in pp for d in FP_SUSP_DIRS)
-        return pn in ('explorer.exe', 'sihost.exe', 'taskhostw.exe', 'ctfmon.exe', 'dwm.exe')
-    return bool(pp) and '\\windows\\' in pp and 'temp' not in pp
+FP_DOC_TOKENS = ('\\documents\\', '\\desktop\\', '\\pictures\\', '\\videos\\', '\\music\\')
+def work_root(d):
+    """复刻生产 _op_work_root: 操作目录归一到顶层工作树"""
+    parts = [p for p in (d or '').lower().replace('/', '\\').split('\\') if p]
+    if not parts: return ''
+    root, i = parts[0], 1
+    if i < len(parts) and parts[i] in ('users', 'documents and settings'):
+        root += '\\users'; i += 1
+        if i < len(parts):
+            root += '\\' + parts[i]; i += 1
+            if i < len(parts) and parts[i] == 'appdata':
+                root += '\\appdata'; i += 1
+                if i < len(parts) and parts[i] in ('local', 'roaming', 'locallow'):
+                    root += '\\' + parts[i]; i += 1
+                    if i < len(parts): root += '\\' + parts[i]
+            elif i < len(parts) and parts[i] in ('documents', 'desktop', 'pictures', 'videos', 'music', 'downloads', 'onedrive'):
+                root += '\\' + parts[i]
+    elif i < len(parts):
+        root += '\\' + parts[i]
+    return root
+
+def sys_loc(p):
+    n = (p or '').lower().replace('\\', '/')
+    return any(t in n and n.find(t) <= 4 for t in ('/windows/', '/program files/', '/program files (x86)/', '/programdata/', '/windowsapps/'))
+
+ROTATE_EXTS = ('.old', '.bak', '.backup', '.tmp', '.temp', '.orig', '.previous', '.sav', '.1', '.2', '.3')
+
+_AUTH_CACHE = {}
+
+def authenticode_ok(path):
+    """复刻生产 _authenticode_ok: WinVerifyTrust 对系统证书库做 Authenticode 链验证。
+    信任锚是密码学签名而非位置: 无签名/自签名/文件放到任何目录都 False, 不可绕过。"""
+    try:
+        import ctypes
+        if not path or not os.path.isfile(path):
+            return False
+        cached = _AUTH_CACHE.get(path)
+        if cached is not None:
+            return cached
+        class WFI(ctypes.Structure):
+            _fields_ = [('cbStruct', ctypes.c_ulong), ('pcwszFilePath', ctypes.c_wchar_p),
+                        ('hFile', ctypes.c_void_p), ('pgKnownSubject', ctypes.c_void_p)]
+        class WTD(ctypes.Structure):
+            _fields_ = [('cbStruct', ctypes.c_ulong),
+                        ('pPolicyCallbackData', ctypes.c_void_p), ('pSIPClientData', ctypes.c_void_p),
+                        ('dwUIChoice', ctypes.c_ulong), ('fdwRevocationChecks', ctypes.c_ulong),
+                        ('dwUnionChoice', ctypes.c_ulong), ('pFile', ctypes.c_void_p),
+                        ('dwStateAction', ctypes.c_ulong), ('hWVTStateData', ctypes.c_void_p),
+                        ('pwszURLReference', ctypes.c_void_p), ('dwProvFlags', ctypes.c_ulong),
+                        ('dwUIContext', ctypes.c_ulong), ('pSignatureSettings', ctypes.c_void_p)]
+        info = WFI(ctypes.sizeof(WFI), str(path), None, None)
+        wtd = WTD()
+        wtd.cbStruct = ctypes.sizeof(WTD)
+        wtd.dwUIChoice, wtd.fdwRevocationChecks, wtd.dwUnionChoice, wtd.dwStateAction = 2, 0, 1, 1
+        wtd.pFile = ctypes.cast(ctypes.byref(info), ctypes.c_void_p)
+        guid = ctypes.create_string_buffer(bytes.fromhex('6BC5AA0044CDD0118CC200C04FC295EE'))
+        ret = ctypes.windll.wintrust.WinVerifyTrust(0, guid, ctypes.byref(wtd))
+        wtd.dwStateAction = 2
+        ctypes.windll.wintrust.WinVerifyTrust(0, guid, ctypes.byref(wtd))
+        ok = (ret == 0)
+        if len(_AUTH_CACHE) > 1024: _AUTH_CACHE.clear()
+        _AUTH_CACHE[path] = ok
+        return ok
+    except Exception:
+        return False
+
+def ransom_exempt(ops, proc_path, proc_pid=True):
+    """与生产 _show_dialog 行为豁免一致(不看进程名不看安装位置):
+    写入者系统组件位置信任(管理员可写目录) + 无内容破坏信号。
+    拦截信号: 有归因删除/替换用户文档内容、真实改后缀重命名>=8(排除轮转改名 LOG->LOG.old)。
+    跨工作树不是信号: 操作窗口全局聚合, 多软件并存必然跨树(生产日志实证误报源)。"""
+    if proc_path and sys_loc(proc_path):
+        return True
+    doc_del, ext_rens, roots, pure_del = False, 0, set(), len(ops) > 0
+    for act, path, old in ops:
+        p = path.lower().replace('/', '\\')
+        roots.add(work_root(os.path.dirname(p)))
+        pure_del = pure_del and act == 'delete'
+        if act == 'rename_new':
+            eo, en = os.path.splitext(old)[1].lower(), os.path.splitext(p)[1].lower()
+            if eo and en and eo != en and en not in ROTATE_EXTS: ext_rens += 1
+        elif act in ('delete', 'create_delete', 'unknown'):
+            if any(t in p for t in FP_DOC_TOKENS): doc_del = True
+    if not proc_pid and pure_del and ext_rens == 0:
+        return True   # 未归因纯删除: 用户清理兜底(生产侧仅计分放行)
+    if ext_rens >= 8 or (proc_pid and doc_del):
+        return False
+    return True
 
 def ransom_burst(ops, t0=1000.0):
     """复刻文件监控爆发判定: modify≥5/3s, 改后缀或跨目录rename≥5/3s, delete≥8/3s"""
@@ -227,18 +305,85 @@ check('释放文件引擎判恶->杀释放链(内容层确定拦截)', True)
 check('驱动释放->直接拦截(内容层确定拦截)', True)
 
 print(f'== 误报组: 正常软件/用户操作 ==')
-# 6. 窗口层豁免(名称+路径核验)
-for nm, pp, desc in [
-    ('OneDrive.exe', 'C:\\Program Files\\Microsoft OneDrive\\OneDrive.exe', 'OneDrive同步'),
-    ('7zFM.exe', 'D:\\Tools\\7-Zip\\7zFM.exe', '7-Zip便携版解压'),
-    ('steam.exe', 'D:\\Steam\\steam.exe', 'Steam更新(库在D盘)'),
-    ('Weixin.exe', 'C:\\Program Files\\Tencent\\WeChat\\WeChat.exe', '微信批量收文件'),
-    ('feishu.exe', 'C:\\Users\\A\\AppData\\Local\\Feishu\\Feishu.exe', '飞书批量收文件'),
-    ('explorer.exe', '', 'explorer手动操作(无路径)'),
-]:
-    check(f'窗口层豁免: {desc}放行', fp_exempt(nm, pp))
-check('窗口层不豁免: 冒名7z.exe在Temp', not fp_exempt('7z.exe', 'C:\\Users\\A\\AppData\\Local\\Temp\\7z.exe'))
-check('窗口层不豁免: Temp未知进程批量写', not fp_exempt('mk.exe', 'C:\\Users\\Public\\mk.exe'))
+# 6. 窗口层行为豁免(不看进程名): 系统组件位置信任 + 无内容破坏信号
+check('行为豁免: OneDrive同步(Program Files写入者)', ransom_exempt(
+    [('modify', f'C:\\Users\\A\\OneDrive\\Documents\\f{i}.docx', '') for i in range(60)],
+    'C:\\Program Files\\Microsoft OneDrive\\OneDrive.exe'))
+check('行为豁免: 7-Zip便携版解压(纯新建, 任意安装位置)', ransom_exempt(
+    [('create', f'D:\\Out\\pkg\\f{i}.dll', '') for i in range(60)], 'D:\\Tools\\7-Zip\\7zFM.exe'))
+check('行为豁免: Steam更新(D盘自家树内改写)', ransom_exempt(
+    [('modify', f'D:\\Steam\\steamapps\\cache{i}.bin', '') for i in range(60)], 'D:\\Steam\\steam.exe'))
+check('行为豁免: 微信批量收文件(Program Files, 纯新建)', ransom_exempt(
+    [('create', f'C:\\Users\\A\\Documents\\WeChat Files\\f{i}.dat', '') for i in range(60)],
+    'C:\\Program Files\\Tencent\\WeChat\\WeChat.exe'))
+check('行为豁免: IDE索引/构建批量写(自家工作树, AppData任意位置)', ransom_exempt(
+    [('modify', f'C:\\Users\\A\\AppData\\Roaming\\Trae CN\\cache\\f{i}.dat', '') for i in range(60)],
+    'C:\\Users\\A\\AppData\\Local\\Programs\\Trae CN\\Trae CN.exe'))
+check('行为豁免: 系统组件(explorer)改写文档', ransom_exempt(
+    [('delete', f'C:\\Users\\A\\Documents\\f{i}.txt', '') for i in range(60)],
+    'C:\\Windows\\explorer.exe'))
+check('行为豁免: 未归因纯删除(用户清理, 仅计分)', ransom_exempt(
+    [('delete', f'C:\\Users\\A\\Documents\\old{i}.txt', '') for i in range(60)], '', proc_pid=False))
+check('行为豁免: 改后缀重命名7个(<8, 少量整理)', ransom_exempt(
+    [('rename_new', f'C:\\Users\\A\\Documents\\f{i}.docx.locked', f'C:\\Users\\A\\Documents\\f{i}.docx') for i in range(7)], '', proc_pid=False))
+check('行为豁免: IDE辅助进程批量写缓存(无文档破坏信号)', ransom_exempt(
+    [('create_delete', f'C:\\Users\\A\\AppData\\Local\\Temp\\qoder-cache{i}.tmp', '') for i in range(60)],
+    'C:\\Users\\A\\AppData\\Local\\Programs\\Qoder\\runtime-info.exe'))
+check('行为豁免: Chrome leveldb轮转改名(LOG->LOG.old)不计改后缀', ransom_exempt(
+    [('create', f'C:\\Users\\A\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache\\c{i}', '') for i in range(40)] +
+    [('rename_new', 'C:\\Users\\A\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\LOG.old',
+      'C:\\Users\\A\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\LOG') for i in range(20)],
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe'))
+check('行为豁免: 多软件并存跨树混合窗口(全局聚合归因不明, 生产日志误报源)', ransom_exempt(
+    [('create_delete', f'C:\\Users\\A\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cache\\c{i}', '') for i in range(25)] +
+    [('modify', f'C:\\Users\\A\\AppData\\Roaming\\Qoder\\logs\\q{i}.log', '') for i in range(25)] +
+    [('create', f'C:\\Users\\A\\AppData\\Local\\workbuddy\\wb{i}.dat', '') for i in range(10)],
+    ''))
+check('行为豁免: IDE在Desktop项目批量改写(用户日常开发)', ransom_exempt(
+    [('modify', f'C:\\Users\\A\\Desktop\\proj\\src\\f{i}.py', '') for i in range(60)],
+    'C:\\Users\\A\\AppData\\Local\\Programs\\Qoder\\Qoder.exe'))
+# 漏报防线: 名字无特权, 行为命中必拦(冒名正规软件名也拦)
+check('不豁免: 冒名7z.exe在Temp批量删除用户文档', not ransom_exempt(
+    [('delete', f'C:\\Users\\A\\Documents\\doc{i}.docx', '') for i in range(60)],
+    'C:\\Users\\A\\AppData\\Local\\Temp\\7z.exe'))
+check('不豁免: 任意名字改后缀重命名爆发(原地加密签名)', not ransom_exempt(
+    [('rename_new', f'C:\\Users\\A\\Documents\\f{i}.docx.locked', f'C:\\Users\\A\\Documents\\f{i}.docx') for i in range(10)], ''))
+check('不豁免: 无位置信任+改后缀爆发跨树(D盘数据+用户文档)', not ransom_exempt(
+    [('rename_new', f'D:\\data\\db{i}.dat.locked', f'D:\\data\\db{i}.dat') for i in range(6)] +
+    [('rename_new', f'C:\\Users\\A\\Documents\\f{i}.docx.locked', f'C:\\Users\\A\\Documents\\f{i}.docx') for i in range(6)],
+    'C:\\Users\\Public\\evil.exe'))
+check('不豁免: 删除用户文档现有内容(有归因写入者)', not ransom_exempt(
+    [('delete', f'C:\\Users\\A\\Documents\\f{i}.xlsx', '') for i in range(60)],
+    'C:\\Users\\Public\\wiper.exe'))
+check('不豁免: 冒名正规安装位置外释放加密改名+删原件', not ransom_exempt(
+    [('rename_new', f'C:\\Users\\A\\Desktop\\p{i}.xlsx.crypt', f'C:\\Users\\A\\Desktop\\p{i}.xlsx') for i in range(10)] +
+    [('delete', f'C:\\Users\\A\\Desktop\\p{i}.xlsx', '') for i in range(10)],
+    'C:\\Users\\A\\AppData\\Roaming\\svch0st.exe'))
+# 快速拦截信任锚 = 签名链密码学校验(非位置非名单, 无法靠落盘位置绕过)
+_QRI = r'C:\Users\Administrator\AppData\Local\Programs\Qoder\resources\umid\runtime-info.exe'
+if os.path.isfile(_QRI):
+    check('签名校验: runtime-info.exe(Qoder)签名链验证通过, 不快速击杀', authenticode_ok(_QRI))
+import tempfile as _tf
+with _tf.TemporaryDirectory() as _td:
+    _u1 = os.path.join(_td, 'fake.exe'); open(_u1, 'wb').write(b'MZ' + b'\x00' * 200)
+    _u2dir = os.path.join(_td, 'Program Files-like'); os.makedirs(_u2dir, exist_ok=True)
+    _u2 = os.path.join(_u2dir, 'fake.exe'); open(_u2, 'wb').write(b'MZ' + b'\x00' * 200)
+    check('签名校验: 未签名假exe不通过(Temp)', not authenticode_ok(_u1))
+    check('签名校验: 同一假exe放到"正规"目录也不通过(位置无用)', not authenticode_ok(_u2))
+    check('签名校验: 空文件/非PE不通过', not authenticode_ok(os.path.join(_td, 'nofile.exe')))
+_pyexe = r'C:\Users\Administrator\AppData\Local\Programs\Python\Python313\python.exe'
+if os.path.isfile(_pyexe):
+    check('签名校验: python.exe(Python Software Foundation)验证通过', authenticode_ok(_pyexe))
+# 静态护栏: 生产源码信任锚与误报源移除
+check('生产源码: 签名链校验_authenticode_ok存在', 'def _authenticode_ok' in SRC)
+check('生产源码: 快速拦截含签名校验否决', '_authenticode_ok(path)' in SRC)
+check('生产源码: 引擎判恶必拦(签名不越权否决判决)', 'signature-verified downgrade' not in SRC)
+check('生产源码: 引擎Worker池化(后台扫描BG并行池)', '_SCAN_WORKER_POOL' in SRC)
+check('生产源码: 判决进行中不预杀同胞实例(拦截权在判决)', '_scan_inflight' in SRC)
+check('生产源码: 位置信任规则已彻底移除(不可落盘绕过)', '_trusted_install_path' not in SRC and 'TRUSTED_INSTALL' not in SRC)
+check('生产源码: WinVerifyTrust真实调用存在', 'WinVerifyTrust' in SRC)
+check('生产源码: 轮转改名排除(日志滚动非加密)', '_ROTATE_EXTS' in SRC)
+check('生产源码: 跨树信号已移除(全局聚合窗口不可归因)', 'len(_roots) > 1)' not in SRC)
 
 # 7. 账本双闸: 正规无签名安装器不达阈值
 lg = Ledger(); t = 3000.0
