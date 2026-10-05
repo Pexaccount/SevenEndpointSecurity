@@ -23,9 +23,9 @@
 
 ---
 
-## SevenEngine V2 v0.0.3 Preview
+## SevenEngine V2 Flash Preview
 
-白样本紧缺，误报飙升，看着一点一点下去的BrewTotal排行榜，我也要炸了
+- 误报降低
 要是有白文件，也可以发送至 `pextechnology@qq.com`
 
 ---
