@@ -46,5 +46,7 @@
 
 - QQ 群聊：`777353898`
 - BiliBili：`Karlmayer`
+- 所属工作室：新启年工作室（NewEra - NES）
+- 工作室网页：[NewEra](https://www.newera2625.top/)
 
 ——感谢使用
