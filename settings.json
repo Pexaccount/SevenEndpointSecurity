@@ -22,5 +22,8 @@
   "cloud_scan": true,
   "edr_protect": true,
   "dll_sideload_protect": true,
-  "etw_telemetry": true
+  "etw_telemetry": true,
+  "wsc_takeover": true,
+  "DefenseMode": true,
+  "scan_model": "tanka2"
 }

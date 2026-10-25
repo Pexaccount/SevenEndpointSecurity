@@ -27,11 +27,11 @@
     },
     {
       "id": "C2_Beacon_Periodic_Small_Upload",
-      "kinds": ["NetConnect"],
+      "kinds": ["C2Chat"],
       "action": "log",
       "score": 5,
       "severity": 30,
-      "_note": "信标检测由 EDR 时序分析产出 C2Chat 事件后在此匹配，引擎判定为恶意进程的网络直接 KILL"
+      "_note": "信标检测由 EDR 时序分析产出 C2Chat 事件后在此匹配，引擎判定为恶意进程的网络直接 KILL。修复：kinds 曾误写 NetConnect，导致每条TCP外联都命中（WorkBuddy/chrome/代理全被拦），已改回设计意图 C2Chat"
     }
   ]
 }

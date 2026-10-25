@@ -49,8 +49,39 @@ def _record_dropped_file(pid, filepath):
         if len(_g_dropped_files) > 600:
             _g_dropped_files.clear()
 
+# 拦截记录 Type 中文 -> 英文(控制台 Interceptions 页显示英文)
+_INT_TYPE_EN = {
+    'EDR行为拦截': 'EDR Behavior Intercept',
+    'EDR行为评分拦截': 'EDR Score Intercept',
+    'EDR评分拦截': 'EDR Score Intercept',
+    'MBR保护': 'MBR Protection',
+    'MSI拦截': 'MSI Install Intercept',
+    '主防-hosts回滚': 'Hosts Revert',
+    '主防-危险命令': 'Dangerous Command',
+    '主防-注册表回滚': 'Registry Revert',
+    '命令拦截': 'Command Intercept',
+    '威胁标签循环击杀': 'Threat-Tag Loop Kill',
+    '攻击链回滚': 'Chain Rollback',
+    '攻击链文件隔离': 'Chain File Quarantine',
+    '攻击链文件隔离(端点研判)': 'Chain File Quarantine (Endpoint)',
+    'ABD-感染链拦截': 'ABD Infection Chain',
+    '敏感操作(恶意源进程)': 'Malicious Dropper Process',
+    '敏感操作(批量释放)': 'Mass File Drop',
+    '敏感操作(端点二次研判)': 'Endpoint Secondary',
+    '敏感操作(系统DLL侧载副本)': 'System DLL Sideload Replica',
+    '敏感操作(释放恶意文件)': 'Malicious File Drop',
+    '敏感操作(驱动安装)': 'Driver Install Attempt',
+    '文件防护': 'File Protection',
+    '文件防护(勒索)': 'Ransomware Protection',
+    '端点二次研判拦截': 'Endpoint Secondary Intercept',
+    '进程拦截(看门狗)': 'Process Intercept (Watchdog)',
+    '进程拦截(重复启动)': 'Process Intercept (Repeat)',
+    '遥测拦截(端点规则)': 'Telemetry Rule Intercept',
+}
+
 def _record_interception(record_type, name, path, threat_type='', confidence=0, engine='', action='terminated', extra=''):
     global _g_intercept_records
+    record_type = _INT_TYPE_EN.get(record_type, record_type)
     rec = {
         'time': time.time(),
         'time_str': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -67,6 +98,19 @@ def _record_interception(record_type, name, path, threat_type='', confidence=0, 
         _g_intercept_records.append(rec)
         if len(_g_intercept_records) > MAX_INTERCEPT_RECORDS:
             _g_intercept_records = _g_intercept_records[-MAX_INTERCEPT_RECORDS:]
+    # 统一事件链: 拦截记录自动镜像为通知(Recent Notifications 与 Recent Interceptions 一致)。
+    # 后续紧随的 _notify 同名同路径 10s 内去重, 不会出现双份。
+    try:
+        if rec.get('threat_type'):
+            _nt = 'Threat Quarantined' if 'quarant' in str(rec.get('action', '')).lower() else 'Threat Blocked'
+            _body = ' · '.join(x for x in (str(rec.get('threat_type') or ''), str(rec.get('extra') or '')[:120]) if x)
+            with _g_notifications_lock:
+                _g_notifications.appendleft({
+                    'time': rec['time_str'], 'title': _nt, 'body': _body or str(rec.get('path') or ''),
+                    'pid': 0, 'name': rec.get('name', ''), 'path': rec.get('path', ''),
+                    '_ts': rec['time']})
+    except Exception:
+        pass
     return rec
 
 
@@ -95,6 +139,28 @@ EDR_EVENT_POINTS = {
     'cred_dump': 20,           # 凭据转储(comsvcs MiniDump/mimikatz式)
     'ioa': 25,                 # IOA动态行为关联命中(多强信号时间窗内共现)
 }
+
+# 白加黑行为判定(非名单): DLL 与 System32/SysWOW64 同名系统DLL重复 = 侧载副本
+def _dup_system_dll_name(name_lower):
+    """行为判定: 该 DLL 名在 System32/SysWOW64 存在同名系统 DLL(即被复制/伪装)。"""
+    try:
+        sysroot = os.environ.get('SystemRoot', r'C:\Windows')
+        return (os.path.exists(os.path.join(sysroot, 'System32', name_lower))
+                or os.path.exists(os.path.join(sysroot, 'SysWOW64', name_lower)))
+    except Exception:
+        return False
+
+def _is_system_dll_replica(path):
+    try:
+        if is_system_path(path):
+            return False
+        name = os.path.basename(path)
+        if not name.lower().endswith('.dll'):
+            return False
+        return _dup_system_dll_name(name.lower())
+    except Exception:
+        return False
+
 _SIDELOAD_PROXY_DLLS = {
     'version.dll', 'winmm.dll', 'dbghelp.dll', 'dxgi.dll', 'd3d8.dll', 'd3d9.dll',
     'd3d10.dll', 'd3d11.dll', 'opengl32.dll', 'glu32.dll', 'iphlpapi.dll',
@@ -133,7 +199,13 @@ _DANGEROUS_CMD_PATTERNS = (
 )
 _g_edr_scores = {}
 _g_edr_scores_lock = threading.Lock()
-LINE_REPORT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Line')
+# 冻结(PyInstaller onefile)模式下 __file__ 指向临时解压目录(_MEIxxxx, 退出即删),
+# 所有随目录持久化的资源/配置必须落在 exe 所在目录
+if getattr(sys, 'frozen', False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LINE_REPORT_DIR = os.path.join(BASE_DIR, 'Line')
 _EXEC_EXTS_G = ('.exe', '.dll', '.sys', '.ps1', '.vbs', '.js', '.bat', '.cmd', '.scr', '.com', '.ocx', '.msi', '.py', '.pyw')
 _re_cmd_script = re.compile(
     r'\\(cmd|powershell|pwsh|wscript|cscript|mshta|rundll32|regsvr32|msbuild|installutil)\.exe', re.I)
@@ -293,7 +365,7 @@ def _edr_add_event(pid, name, path, etype, points=None, detail=''):
 # 单一信号规则拒绝加载 —— 与单因素上限(EDR_MAX_SINGLE_FACTOR=35)叠加双保险。
 # 规则JSON格式: {"rules": [{"name":.., "signals":[["事件类型","detail正则"|null],..],
 #                            "window":秒, "points":分, "enabled":true}]}
-IOA_RULES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Rules')
+IOA_RULES_DIR = os.path.join(BASE_DIR, 'Rules')
 _g_ioa_rules = []
 _g_ioa_rules_mtime = {}
 _g_ioa_lock = threading.Lock()
@@ -404,6 +476,231 @@ def _ioa_evaluate(pid, name, path):
     except Exception:
         pass
 
+# ============================ ABD 感染链行为分析(感染型病毒/PE 感染器) ============================
+# 设计目标: 低误报 + 精确拦截。只加不改, 复用 IOA/遥测账本/签名校验/隔离/链报告设施。
+# 感染链定义: 进程 A 原地改写"既有 PE"(MZ 且近期无 filecreate, 即非 A 新建) -> 该 PE 之后被
+# 其他进程链执行 -> 感染链成立(写入者链 != 执行者链, 排除安装器/编译器"自己写自己跑")。
+# 处置分级(低误报闸门):
+#   1) 有可信基线(历史签名有效快照)且执行时头部/大小/签名被证篡改 -> 硬拦截:
+#      终止被感染进程链 + 隔离感染源(被改写 PE, 可还原) + Threat 通知 + WebUI 链报告;
+#   2) 无基线(无签名目标) -> 只计分告警(pe_infect_write/infected_exec + IOA-Infect 关联),
+#      交给既有阈值自动处置, 不做硬拦截;
+#   3) 写时签名仍有效 => 合法更新(更新器/安装器) -> 存可信基线, 不跟踪不告警。
+_ABD_PE_EXTS = ('.exe', '.dll', '.scr', '.com', '.ocx', '.cpl')
+_g_abd_lock = threading.Lock()
+_g_abd_created = {}     # path_norm -> ts (近期 filecreate => 新建文件, 排除出感染目标)
+_g_abd_pe_writes = {}   # path_norm -> dict(ts, root, writer, size, hdr) 疑似感染写
+_g_abd_pe_base = {}     # path_norm -> (size, ep, nsec)  签名有效时记录的可信快照
+
+def _abd_pe_header(path):
+    """解析 PE 头: 返回 (AddressOfEntryPoint, NumberOfSections) 或 None(非 PE/损坏)。"""
+    try:
+        with open(path, 'rb') as f:
+            if f.read(2) != b'MZ':
+                return None
+            f.seek(0x3C)
+            e_lfanew = int.from_bytes(f.read(4), 'little')
+            if e_lfanew <= 0 or e_lfanew > 10 * 1024 * 1024:
+                return None
+            f.seek(e_lfanew)
+            if f.read(4) != b'PE\x00\x00':
+                return None
+            f.read(2)                                   # Machine
+            nsec = int.from_bytes(f.read(2), 'little')  # NumberOfSections
+            f.read(12)                                  # TimeDateStamp/PointerToSymbolTable/NumberOfSymbols
+            f.read(2)                                   # SizeOfOptionalHeader
+            f.read(2)                                   # Characteristics
+            f.seek(e_lfanew + 24 + 16)                  # OptionalHeader.AddressOfEntryPoint
+            ep = int.from_bytes(f.read(4), 'little')
+        return (ep, nsec)
+    except Exception:
+        return None
+
+def _abd_excluded(pl):
+    """ABD 排除树: Windows 系统(WU/servicing 高频合法改写) + 产品自身 + 引擎目录。"""
+    try:
+        return ('\\windows\\' in pl
+                or '\\sevenendpointsecurity\\' in pl or '\\sevenhips\\' in pl
+                or '\\sevenedr\\' in pl or '\\sevenmain\\' in pl or '\\enginers\\' in pl
+                or '\\drvinstall\\' in pl
+                or _in_engine_dir(pl) or _in_infrasonic_dir(pl)
+                or (pl.startswith(BASE_DIR.lower()) if BASE_DIR else False))
+    except Exception:
+        return True
+
+def _abd_note_created(pid, target):
+    """filecreate 遥测挂钩: 记录新建文件及其创建者链(安装器/编译器产出, 排除出感染目标集)。"""
+    try:
+        if not target or ':\\' not in target:
+            return
+        tl = (target or '').lower()
+        if not tl.endswith(_ABD_PE_EXTS):
+            return
+        pn = os.path.normcase(os.path.normpath(target))
+        now = time.time()
+        with _g_abd_lock:
+            _g_abd_created[pn] = (_edr_root_pid(pid) or int(pid or 0), now)
+            if len(_g_abd_created) > 5000:
+                for k in [k for k, v in _g_abd_created.items() if now - v[1] > 86400][:2500]:
+                    _g_abd_created.pop(k, None)
+    except Exception:
+        pass
+
+def _abd_note_filewrite(parent, pid, name, proc_path, target):
+    """filewrite/filemodify 遥测挂钩: 既有 PE 原地改写 -> 感染写跟踪/计分。"""
+    try:
+        if not target or ':\\' not in target:
+            return
+        tl = (target or '').lower()
+        if not tl.endswith(_ABD_PE_EXTS) or _abd_excluded(tl):
+            return
+        now = time.time()
+        pn = os.path.normcase(os.path.normpath(target))
+        writer_root = _edr_root_pid(pid) or int(pid or 0)
+        with _g_abd_lock:
+            ct = _g_abd_created.get(pn)
+        if ct and int(ct[0] or 0) == int(writer_root):
+            return                      # 创建者=写入者(同一链): 安装器/编译器自产自用, 非感染目标
+        if not os.path.isfile(target):
+            return
+        try:
+            with open(target, 'rb') as f:
+                if f.read(2) != b'MZ':
+                    return
+        except OSError:
+            return
+        hdr = _abd_pe_header(target)
+        try:
+            size = os.path.getsize(target)
+        except OSError:
+            size = 0
+        # 签名核验(新鲜, 防缓存陈旧): 写后仍有效 => 合法更新, 存可信基线不跟踪
+        for ck in (str(target), pn):
+            _AUTH_CACHE.pop(ck, None)
+        sig_ok = _authenticode_ok(target)
+        root = _edr_root_pid(pid) or int(pid or 0)
+        if sig_ok:
+            if hdr:
+                with _g_abd_lock:
+                    _g_abd_pe_base[pn] = (size, hdr[0], hdr[1])
+                    _g_abd_pe_writes.pop(pn, None)
+            return
+        # 未签名/签名失效: 疑似感染写 -> 计分 + 跟踪(执行时取证裁决)
+        with _g_abd_lock:
+            _g_abd_pe_writes[pn] = {'ts': now, 'root': int(root), 'writer': name or '?',
+                                    'size': size, 'hdr': hdr}
+            if len(_g_abd_pe_writes) > 500:
+                for k in sorted(_g_abd_pe_writes, key=lambda k: _g_abd_pe_writes[k]['ts'])[:250]:
+                    _g_abd_pe_writes.pop(k, None)
+        _edr_add_event(int(root), name or os.path.basename(proc_path or '') or 'Unknown.exe',
+                       proc_path or target, 'pe_infect_write', 10,
+                       'ABD: PE rewrite (pre-existing, unsigned/broken-sig): {}'.format(target))
+        _edr_log("ABD pe_infect_write pid={} root={} file={}".format(pid, root, target))
+    except Exception:
+        pass
+
+def _abd_note_processexec(parent, pid, ppid, name, image_path):
+    """processcreate 遥测挂钩: 被改写 PE 执行 -> 取证裁决/可信基线记录。"""
+    try:
+        if not image_path or ':\\' not in image_path:
+            return
+        il = (image_path or '').lower()
+        if not il.endswith(_ABD_PE_EXTS) or _abd_excluded(il):
+            return
+        pn = os.path.normcase(os.path.normpath(image_path))
+        with _g_abd_lock:
+            w = _g_abd_pe_writes.get(pn)
+            base = _g_abd_pe_base.get(pn)
+        now = time.time()
+        if w is None:
+            # 无嫌疑: 签名缓存有效的镜像 -> 记录可信基线(供日后感染取证), 热路径零额外签名调用
+            if base is None and _AUTH_CACHE.get(str(image_path)) is True:
+                hdr = _abd_pe_header(image_path)
+                if hdr:
+                    try:
+                        bsize = os.path.getsize(image_path)
+                    except OSError:
+                        bsize = 0
+                    with _g_abd_lock:
+                        _g_abd_pe_base.setdefault(pn, (bsize, hdr[0], hdr[1]))
+                        if len(_g_abd_pe_base) > 2000:
+                            for k in list(_g_abd_pe_base.keys())[:1000]:
+                                _g_abd_pe_base.pop(k, None)
+            return
+        if now - w['ts'] > 48 * 3600:
+            with _g_abd_lock:
+                _g_abd_pe_writes.pop(pn, None)
+            return
+        root = _edr_root_pid(pid) or int(pid or 0)
+        if int(root) == int(w.get('root') or 0):
+            return                      # 同链: 自己写自己跑(安装器/补丁器) -> 放行
+        hdr = _abd_pe_header(image_path)
+        try:
+            size = os.path.getsize(image_path)
+        except OSError:
+            size = 0
+        proof = False
+        if base is not None:
+            # 可信基线取证: 头部/大小任一被证篡改, 或签名失效 -> 铁证
+            if hdr is None or (size, hdr[0], hdr[1]) != base:
+                proof = True
+            else:
+                for ck in (str(image_path), pn):
+                    _AUTH_CACHE.pop(ck, None)
+                if not _authenticode_ok(image_path):
+                    proof = True
+        # 无基线: 无签名目标无法证明篡改 -> 仅计分告警(低误报优先)
+        if not proof:
+            _edr_add_event(int(root), name or os.path.basename(image_path), image_path,
+                           'infected_exec', 15,
+                           'ABD: exec of recently rewritten PE (unsigned, unproven): {}'.format(image_path))
+            _edr_log("ABD infected_exec(unproven) pid={} root={} file={}".format(pid, root, image_path))
+            return
+        # ---- 铁证: 硬拦截(自动化, 无交互提示链路) ----
+        dm = bool(g_settings.get('DefenseMode', False))
+        killed = False
+        chain_desc = name or ''
+        rm = getattr(parent, '_realtime_monitor', None)
+        if rm and not dm:
+            try:
+                ch = rm._terminate_chain(int(pid), name or os.path.basename(image_path),
+                                         image_path, full=True)
+                chain_desc = ' -> '.join('{}({})'.format(n, p) for n, p, _t, _a in ch) or chain_desc
+                killed = bool(ch)
+            except Exception:
+                pass
+        qdest = ''
+        try:
+            time.sleep(0.3)             # 等句柄释放(运行中镜像不可移动)
+            qdest = _quarantine_file(image_path, 'ABD PE-Infect') or ''
+        except Exception:
+            qdest = ''
+        _edr_report_chain(int(pid), name or os.path.basename(image_path), image_path,
+                          [('ABD infection chain: PE rewritten by {} then executed (signed-baseline tamper)'.format(
+                              w.get('writer') or '?'), 30)],
+                          action='quarantined' if qdest else 'blocked')
+        _edr_add_event(int(root), name or os.path.basename(image_path), image_path,
+                       'infected_exec', 30,
+                       'ABD CONFIRMED PE infection (baseline tamper): {}'.format(image_path))
+        _record_interception('ABD-感染链拦截', name or os.path.basename(image_path), image_path,
+                             threat_type='pe_infect', confidence=95,
+                             engine='ABD行为分析', action='quarantined' if qdest else 'terminated',
+                             extra='writer={}; chain={}; quarantine={}'.format(
+                                 w.get('writer') or '?', chain_desc,
+                                 qdest or 'locked'))
+        _edr_log("ABD-HIT INFECT pid={} root={} file={} killed={} quarantined={}".format(
+            pid, root, image_path, killed, qdest))
+        _notify("Threat Quarantined",
+                "Infected PE {}: rewritten by {}{}, infection source {}".format(
+                    os.path.basename(image_path), w.get('writer') or '?',
+                    ' | chain killed' if killed else '',
+                    'quarantined: ' + os.path.basename(qdest) if qdest else 'locked (reboot needed)'),
+                pid=int(pid or 0), name=name or '', path=image_path)
+        with _g_abd_lock:
+            _g_abd_pe_writes.pop(pn, None)
+    except Exception:
+        pass
+
 def _edr_mark_ledger_exit(pid):
     """进程退出: 账本冻结(整链保留全程, 不清分), 供溯源。"""
     try:
@@ -443,6 +740,21 @@ def _edr_get_chain_events(pid, name, path, extra_events=None):
                     rows.append((a.get('time', 0), 'chain', "[chain] {} {}".format(a.get('action', ''), a.get('detail', ''))[:200], 0))
     except Exception:
         pass
+    try:
+        with _g_intercept_lock:
+            recs = list(_g_intercept_records)[-200:]
+        for r in recs:
+            _extra = str(r.get('extra') or '')
+            _hit = 'PID:{}'.format(int(pid or 0)) in _extra
+            if not _hit:
+                continue
+            rows.append((r.get('time', 0), 'intercept',
+                         "[intercept] {} {}({}) {} | {}".format(
+                             r.get('type', ''), r.get('name', ''), r.get('pid', 0),
+                             r.get('path', ''), r.get('extra', ''))[:240],
+                         int(r.get('confidence', 0) or 0)))
+    except Exception:
+        pass
     rows.sort(key=lambda r: r[0])
     return rows
 
@@ -478,7 +790,29 @@ def _edr_report_chain(pid, name, path, events, action='blocked'):
         except Exception:
             pass
         with _g_dropped_files_lock:
-            dropped = sorted(_g_dropped_files.get(int(pid or 0), ()))[:60]
+            dropped = sorted(_g_dropped_files.get(int(pid or 0), {}))[:60]
+        # 融合: 子进程事件并入链(一个进程做多操作/多进程共一条链 -> 单图融合)
+        for cpid, cn, cp_, cal in children:
+            try:
+                with _g_edr_scores_lock:
+                    crec = _g_edr_scores.get(int(cpid or 0)) or {}
+                    for ts, et, det, pt in (crec.get('events') or [])[-100:]:
+                        rows.append((ts, et, '[{}({})] {}'.format(cn, cpid, det), pt))
+            except Exception:
+                pass
+        rows.sort(key=lambda r: r[0])
+        # 融合: 释放物从事件流补全(回滚后 _g_dropped_files 可能已 pop, 但事件仍在)
+        try:
+            for ts, et, det, pt in rows:
+                if et in ('filedrop', 'driver_drop', 'dll_drop', 'mal_drop'):
+                    m = re.search(r'[A-Za-z]:\\[^\r\n"\']+', det or '')
+                    if m:
+                        fp = m.group(0).rstrip(' .;')
+                        if fp not in dropped:
+                            dropped.append(fp)
+            dropped = dropped[:60]
+        except Exception:
+            pass
         # ---------- 思维导图(纯SVG+绝对定位div) ----------
         W, H = 1080, 620
         cx, cy = 540, 300
@@ -524,7 +858,8 @@ def _edr_report_chain(pid, name, path, events, action='blocked'):
                        'privilege': 'Privilege Abuse', 'task_sched': 'Task Scheduler',
                        'registry_sensitive': 'Registry Sensitive', 'uac_bypass': 'UAC Bypass',
                        'av_tamper': 'AV Tamper', 'cred_dump': 'Credential Dump',
-                       'lsass_access': 'LSASS Access', 'c2': 'C2 Connect'}
+                       'lsass_access': 'LSASS Access', 'c2': 'C2 Connect',
+                       'intercept': 'Interception', 'ioa': 'IOA Correlation'}
         import math as _math
         op_types = [et for et in op_by_type if op_by_type[et]]
         n_ops = min(len(op_types), 10)
@@ -544,64 +879,214 @@ def _edr_report_chain(pid, name, path, events, action='blocked'):
                 mm_nodes.append((ox, oy, etype_label.get(et, et.title()),
                                  '{} pts | {}'.format(pt, (best[1] or '')[:70]), cls, 'op'))
                 mm_edges.append((cx, cy, ox, oy, 'op' + (' high' if pt >= 10 else ' med' if pt >= 5 else '')))
-        # ---------- 拼 HTML(纯字符串拼接, CSS含花括号不能走format) ----------
-        def _node_html(x, y, title, sub, cls, _direction=None):
-            return ("<div class='node " + cls + "' style='left:" + str(int(x - 90)) + "px;top:" + str(int(y - 26)) + "px'>"
-                    "<div class='nt'>" + _html_esc(title) + "</div><div class='ns'>" + _html_esc(sub) + "</div></div>")
-        nodes_html = ''.join(_node_html(*n) for n in mm_nodes)
-        lines_html = ''.join(
-            "<line x1='" + str(int(e[0])) + "' y1='" + str(int(e[1])) + "' x2='" + str(int(e[2])) +
-            "' y2='" + str(int(e[3])) + "' class='" + e[4] + "'/>" for e in mm_edges)
-        css = ("body{font-family:Consolas,'Microsoft YaHei',monospace;background:#141d2b;color:#d8e2f0;margin:20px}"
-               "h1{color:#4fc3f7;font-size:20px}h2{color:#ffb74d;font-size:15px;margin-top:22px}"
-               "table{border-collapse:collapse;width:100%}td{border:1px solid #2c3d57;padding:4px 8px;font-size:13px}"
-               ".alive{color:#81c784}.exited{color:#90a4ae}.badge{background:#d32f2f;color:#fff;padding:2px 10px;border-radius:10px}"
-               "li{font-size:13px}"
-               ".map{position:relative;width:" + str(W) + "px;height:" + str(H) + "px;background:#101826;"
-               "border:1px solid #2c3d57;border-radius:10px;overflow:hidden;margin:10px 0}"
-               ".map svg{position:absolute;left:0;top:0;width:100%;height:100%}"
-               ".map line.tree{stroke:#3d5a80;stroke-width:2}.map line.op{stroke:#546e7a;stroke-width:1.5;stroke-dasharray:5,4}"
-               ".map line.op.med{stroke:#ef6c00}.map line.op.high{stroke:#e53935;stroke-width:2.5}"
-               ".node{position:absolute;width:180px;background:#1a2637;border:1px solid #3d5a80;border-radius:8px;"
-               "padding:8px 10px;box-shadow:0 2px 8px rgba(0,0,0,.5)}"
-               ".node .nt{font-weight:bold;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
-               ".node .ns{font-size:11px;color:#8fa8c7;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
-               ".node.proc.main{border-color:#4fc3f7;background:#15324a}.node.proc.main .nt{color:#4fc3f7}"
-               ".node.proc.alive .nt{color:#81c784}.node.proc.exited .nt{color:#90a4ae}"
-               ".node.op.high{border-color:#e53935;background:#3a1a20}.node.op.high .nt{color:#ef5350}"
-               ".node.op.med{border-color:#ef6c00;background:#33260f}.node.op.med .nt{color:#ffb74d}"
-               ".node.op.low{border-color:#455a64}.node.op.low .nt{color:#90a4ae}")
-        ev_html = ''.join(
-            "<tr><td>" + (time.strftime('%H:%M:%S', time.localtime(ts)) if ts else '-') + "</td><td>" +
-            _html_esc(etype_label.get(et, et)) + "</td><td>" + _html_esc(desc) + "</td><td style='text-align:right'>" +
-            str(pt) + "</td></tr>"
-            for ts, et, desc, pt in rows)
+        # ---------- 拼 HTML(白底横向思维导图: 竖色条=严重度, 右侧分数, 悬停=时间+加分, 贝塞尔弧线, 拖拽+滚轮缩放, 右上角详情菜单) ----------
+        _sev = lambda pt: 'high' if pt >= 10 else ('med' if pt >= 5 else ('low' if pt > 0 else 'none'))
+        sev_color = {'high': '#c62828', 'med': '#ef6c00', 'low': '#2e7d32', 'none': '#78909c', 'proc': '#1565c0', 'main': '#0d47a1', 'tree': '#37474f'}
+        def _node_json(x, y, title, sub, sev, pts, tip, kind):
+            return ("{x:%d,y:%d,t:%s,s:%s,sev:'%s',pts:%d,tip:%s,kind:'%s'}" % (
+                int(x), int(y), json.dumps(title, ensure_ascii=False), json.dumps(sub, ensure_ascii=False),
+                sev, int(pts or 0), json.dumps(tip, ensure_ascii=False), kind))
+        # ---- 布局: 父链(左列) -> 主进程(中心) -> 子进程+操作节点(右侧时间序网格, 从左往右) ----
+        W, H = 2050, 980
+        mx, my = 430, 470          # 主进程中心
+        nodes = []                 # dict 列表
+        edges = []                 # (x1,y1,x2,y2,color,dash)
+        parents = parents[:6]
+        children = children[:8]
+        py0 = my - (len(parents) - 1) * 150 if parents else my
+        for i, (p, n, pp, al) in enumerate(parents):
+            nodes.append(dict(x=120, y=py0 + i * 150, t=n, s='PID:{} {}'.format(p, 'alive' if al else 'exited'),
+                              sev='proc', pts=0, kind='proc',
+                              tip='{} (PID {}) | {}'.format(n, p, pp or ''), parent_pid=p))
+            if i > 0:
+                edges.append((120, py0 + i * 150 - 55, 120, py0 + (i - 1) * 150 + 55, sev_color['tree'], False))
+        nodes.append(dict(x=mx, y=my, t=name or 'Unknown.exe', s='PID:{} | SCORE {}'.format(int(pid or 0), score),
+                          sev='main', pts=score, kind='main',
+                          tip='{} (PID {}) | {} | score {}/{}'.format(name or 'Unknown.exe', pid, path or '', score, EDR_SCORE_THRESHOLD)))
+        if parents:
+            edges.append((120, py0 + (len(parents) - 1) * 150, mx - 110, my, sev_color['tree'], False))
+        # 操作节点: 全部事件类型(含注册表/进程/文件/注入/网络/持久化/拦截动作), 按类别取代表事件
+        op_by_type = {}
+        for ts, et, det, pt in rows:
+            op_by_type.setdefault(et, []).append((ts, det, pt))
+        op_types = [et for et in op_by_type if op_by_type[et]][:16]
+        per_col = 4
+        n_ops = len(op_types)
+        for i, et in enumerate(op_types):
+            col, row = i // per_col, i % per_col
+            ox = 880 + col * 330
+            oy = 170 + row * 195 + (40 if (n_ops > per_col and col % 2 == 1) else 0)
+            evs = op_by_type[et]
+            best = evs[-1]
+            pt = int(best[2] or 0)
+            sev = 'tree' if et in ('chain', 'intercept') else _sev(pt)
+            label = etype_label.get(et, et.title())
+            tip = '{} | +{} pts | {} 条事件'.format(
+                time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(best[0])) if best[0] else '-', pt, len(evs))
+            nodes.append(dict(x=ox, y=oy, t=label, s=(best[1] or '')[:64], sev=sev, pts=pt, kind='op',
+                              tip=tip, detail_ev=[(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)) if ts else '-',
+                                                   (d or '')[:200], int(p or 0)) for ts, d, p in evs[-8:]]))
+            edges.append((mx + 110, my, ox - 120, oy, sev_color.get(sev, '#78909c'), pt < 5))
+        # 释放物入图: 挂主进程右侧一列(Dropped Files 不再只躺在下方列表)
+        _drop_list = dropped[:6]
+        _dy0 = my - (len(_drop_list) - 1) * 150 if _drop_list else my
+        for i, fp in enumerate(_drop_list):
+            nodes.append(dict(x=760, y=_dy0 + i * 150, t='File Drop', s=os.path.basename(fp)[:40],
+                              sev='med', pts=5, kind='op',
+                              tip=time.strftime('%Y-%m-%d %H:%M:%S') + ' | dropped: ' + fp,
+                              detail_ev=[(time.strftime('%Y-%m-%d %H:%M:%S'), fp, 0)]))
+            edges.append((mx + 110, my, 760 - 120, _dy0 + i * 150, '#ef6c00', True))
+        # ---- 处决节点(闭环): 最右侧, 所有操作/子进程/释放物汇聚 -> 最终采取的行动 + 处决分数 ----
+        ex_x, ex_y = 1800, my
+        nodes.append(dict(x=ex_x, y=ex_y, t='Executed', s='Action: {} | {}'.format(action, os.path.basename(name or '')),
+                          sev='high' if score >= 60 else 'med', pts=score, kind='exec',
+                          tip='{} | Execution score {} | action: {}'.format(
+                              time.strftime('%Y-%m-%d %H:%M:%S'), score, action)))
+        for n in nodes:
+            if n['kind'] not in ('exec', 'main', 'proc') or (n['kind'] == 'proc' and n['x'] > 700):
+                if n['x'] >= 760:
+                    edges.append((n['x'] + 110, n['y'], ex_x - 110, ex_y, '#b71c1c', False))
+        # 闭环: 处决节点 -> 主进程 回连虚线(链闭环)
+        edges.append((ex_x - 110, ex_y, mx + 110, my, '#b71c1c', True))
+        # 子进程并入最右前位列(若有空位)
+        used_cells = {(n['x'], n['y']) for n in nodes if n['kind'] == 'op'}
+        for p, n, pp, al in children:
+            for col in range(3, -1, -1):
+                placed = False
+                for row in range(per_col):
+                    ox, oy = 880 + col * 330, 170 + row * 195
+                    if (ox, oy) not in used_cells:
+                        nodes.append(dict(x=ox, y=oy, t=n, s='PID:{} {}'.format(p, 'alive' if al else 'exited'),
+                                          sev='proc', pts=0, kind='proc', tip='{} (PID {}) | {}'.format(n, p, pp or '')))
+                        edges.append((mx + 110, my, ox - 120, oy, sev_color['tree'], False))
+                        used_cells.add((ox, oy))
+                        placed = True
+                        break
+                if placed:
+                    break
+        nodes_js = ','.join(_node_json(n['x'], n['y'], n['t'], n['s'], n['sev'], n['pts'], n['tip'], n['kind']) for n in nodes)
+        detail_map = {}
+        for n in nodes:
+            if n.get('detail_ev'):
+                detail_map[n['t']] = n['detail_ev']
+        detail_js = json.dumps(detail_map, ensure_ascii=False)
+        edges_js = ','.join("[{},{},{},{},{},{}]".format(int(a), int(b), int(c), int(d2),
+                                                         json.dumps(col), 'true' if dash else 'false')
+                            for a, b, c, d2, col, dash in edges)
+        ev_rows = [(time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(ts)) if ts else '-', et, desc, pt) for ts, et, desc, pt in rows]
+        ev_js = json.dumps([{'t': t, 'type': etype_label.get(et, et), 'd': (desc or '')[:260], 'p': int(pt or 0)} for t, et, desc, pt in ev_rows], ensure_ascii=False)
         tree_rows = [(p, n, pp, al) for p, n, pp, al in parents] + \
                     [(int(pid or 0), name or 'Unknown.exe', path or '', None if node is None else node.get('alive'))] + children
         tree_html = ''.join(
             "<div class='" + ('alive' if al else 'exited') + "'>" + _html_esc(n) + " (PID:" + str(p) + ") <span class='path'>" +
             _html_esc(pp) + "</span></div>" for p, n, pp, al in tree_rows)
         drop_html = ''.join("<li>" + _html_esc(f) + "</li>" for f in dropped) or '<li>(none)</li>'
+        css = ("*{box-sizing:border-box}"
+               "body{font-family:'Segoe UI','Microsoft YaHei',sans-serif;background:#f5f7fa;color:#1e2b3a;margin:0;padding:18px}"
+               "h1{color:#0d47a1;font-size:21px;margin:0 0 6px}h2{color:#37474f;font-size:15px;margin-top:22px}"
+               ".head{display:flex;align-items:center;gap:14px;flex-wrap:wrap}"
+               ".badge{background:#c62828;color:#fff;padding:3px 12px;border-radius:12px;font-size:12px;font-weight:600}"
+               ".meta{color:#546e7a;font-size:13px;line-height:1.7}"
+               "table{border-collapse:collapse;width:100%;background:#fff;border-radius:10px;overflow:hidden;box-shadow:0 1px 4px rgba(0,0,0,.08)}"
+               "td{border-bottom:1px solid #eceff1;padding:6px 10px;font-size:12.5px}"
+               ".alive{color:#2e7d32}.exited{color:#90a4ae}"
+               ".viewport{position:relative;width:100%;height:720px;background:#eef2f6;border:1px solid #e0e6ec;border-radius:14px;"
+               "overflow:hidden;cursor:grab;margin:12px 0 4px;user-select:none}"
+               ".viewport.drag{cursor:grabbing}"
+               ".world{position:absolute;left:0;top:0;transform-origin:0 0}"
+               ".world svg{position:absolute;left:0;top:0;overflow:visible}"
+               ".wpath{fill:none;stroke-width:2.2;opacity:.85}"
+               ".node{position:absolute;width:210px;transform:translate(-50%,-50%);background:#fff;border:1px solid #e3e9ef;"
+               "border-radius:14px;padding:10px 12px 10px 16px;box-shadow:0 2px 10px rgba(30,45,60,.10);display:flex;align-items:center;gap:10px;cursor:pointer}"
+               ".node:hover{box-shadow:0 4px 18px rgba(30,45,60,.22)}"
+               ".node .bar{position:absolute;left:6px;top:10px;bottom:10px;width:5px;border-radius:3px}"
+               ".node .bd{flex:1;min-width:0}"
+               ".node .nt{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+               ".node .ns{font-size:11px;color:#78909c;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+               ".node .pts{font-weight:700;font-size:15px;margin-left:2px}"
+               ".node.sev-main{border:2px solid #1565c0;background:#e8f1fd}.node.sev-main .nt{color:#0d47a1}.node.sev-main .pts{color:#1565c0}"
+               ".node.sev-proc .bar{background:#546e7a}.node.sev-main .bar{background:#1565c0}"
+               ".node.sev-high .bar{background:#c62828}.node.sev-high .pts{color:#c62828}"
+               ".node.sev-med .bar{background:#ef6c00}.node.sev-med .pts{color:#ef6c00}"
+               ".node.sev-low .bar{background:#2e7d32}.node.sev-low .pts{color:#2e7d32}"
+               ".node.sev-none .bar{background:#b0bec5}.node.sev-none .pts{color:#90a4ae;color:#90a4ae}"
+               ".node.sev-tree .bar{background:#37474f}.node.sev-tree .pts{color:#37474f}"
+               "#tip{position:fixed;display:none;background:#263238;color:#eceff1;font-size:12px;padding:7px 10px;"
+               "border-radius:8px;pointer-events:none;z-index:50;max-width:360px;line-height:1.5;box-shadow:0 4px 14px rgba(0,0,0,.3)}"
+               "#menu{position:absolute;right:14px;top:14px;width:330px;max-height:600px;overflow:auto;background:rgba(255,255,255,.97);"
+               "border:1px solid #e0e6ec;border-radius:12px;box-shadow:0 4px 18px rgba(30,45,60,.18);padding:12px;display:none;z-index:20}"
+               "#menu h3{margin:4px 0 8px;font-size:14px;color:#0d47a1}"
+               ".mi{border-bottom:1px solid #f0f3f6;padding:6px 2px;font-size:12px}"
+               ".mi .t{color:#37474f;font-weight:600}.mi .d{color:#546e7a;margin-top:2px;word-break:break-all}"
+               ".mi .p{color:#c62828;font-weight:700;float:right}"
+               "#toolbar{position:absolute;left:14px;top:14px;z-index:20;display:flex;gap:6px}"
+               "#toolbar button{background:#fff;border:1px solid #e0e6ec;border-radius:8px;padding:5px 12px;cursor:pointer;font-size:12px;color:#37474f}"
+               "#toolbar button:hover{background:#f0f4f8}")
         html = ("<!DOCTYPE html><html><head><meta charset='utf-8'><title>Attack Chain Report</title>"
                 "<style>" + css + "</style></head><body>"
-                "<h1>Attack Chain Report - SevenEndPointSecurity EDR <span class='badge'>" + _html_esc(action) + "</span></h1>"
-                "<p><b>Process:</b> " + _html_esc(name or 'Unknown.exe') + " (PID: " + str(int(pid or 0)) + ")<br>"
-                "<b>Path:</b> " + _html_esc(path or '') + "<br>"
-                "<b>Time:</b> " + time.strftime('%Y-%m-%d %H:%M:%S') + "<br>"
-                "<b>Score:</b> " + str(score) + " / " + str(EDR_SCORE_THRESHOLD) + "</p>"
-                "<h2>Behavior Mind Map</h2><div class='map'>"
-                "<svg><defs><marker id='arr' markerWidth='8' markerHeight='8' refX='6' refY='3' orient='auto'>"
-                "<path d='M0,0 L6,3 L0,6' fill='none' stroke='#546e7a' stroke-width='1'/></marker></defs>"
-                + lines_html + "</svg>" + nodes_html + "</div>"
+                "<div class='head'><h1>Attack Chain Report</h1>"
+                "<span class='badge'>" + _html_esc(action) + "</span>"
+                "<span class='meta'><b>" + _html_esc(name or 'Unknown.exe') + "</b> (PID " + str(int(pid or 0)) + ") | "
+                + _html_esc(path or '') + " | " + time.strftime('%Y-%m-%d %H:%M:%S') +
+                " | Score <b>" + str(score) + "</b>/" + str(EDR_SCORE_THRESHOLD) + "</span></div>"
+                "<div class='viewport' id='vp'>"
+                "<div id='toolbar'><button onclick='zoom(1.25)'>+</button><button onclick='zoom(0.8)'>-</button>"
+                "<button onclick='reset()'>Reset</button></div>"
+                "<div id='menu'><h3 id='mt'></h3><div id='mb'></div></div>"
+                "<div class='world' id='world'><svg id='edgsvg' width='" + str(W) + "' height='" + str(H) + "'></svg></div>"
+                "</div>"
                 "<h2>Process Tree</h2>" + tree_html +
                 "<h2>Events Timeline (traced)</h2><table><tr><td><b>Time</b></td><td><b>Type</b></td>"
-                "<td><b>Detail</b></td><td><b>Pts</b></td></tr>" + ev_html + "</table>"
+                "<td><b>Detail</b></td><td><b>Pts</b></td></tr>" +
+                ''.join("<tr><td>" + t + "</td><td>" + _html_esc(ty) + "</td><td>" + _html_esc(d) +
+                        "</td><td style='text-align:right;font-weight:700'>" + str(pt2) + "</td></tr>"
+                        for t, ty, d, pt2 in ev_rows) + "</table>"
                 "<h2>Dropped Files</h2><ul>" + drop_html + "</ul>"
-                "</body></html>")
+                "<div id='tip'></div>"
+                "<script>"
+                "var NODES=[" + nodes_js + "];"
+                "var EDGES=[" + edges_js + "];"
+                "var DETAILS=" + detail_js + ";"
+                "var EVELIST=" + ev_js + ";"
+                "var sc=1,tx=0,ty=0;"
+                "var world=document.getElementById('world'),vp=document.getElementById('vp'),tip=document.getElementById('tip');"
+                "function apply(){world.style.transform='translate('+tx+'px,'+ty+'px) scale('+sc+')';}"
+                "function zoom(f){var r=Math.min(2.5,Math.max(0.25,sc*f));sc=r;apply();}"
+                "function reset(){sc=1;tx=0;ty=0;apply();}"
+                "function bez(x1,y1,x2,y2){var dx=Math.abs(x2-x1)*0.5;return 'M'+x1+','+y1+' C'+(x1+dx)+','+y1+' '+(x2-dx)+','+y2+' '+x2+','+y2;}"
+                "var svg=document.getElementById('edgsvg');"
+                "svg.innerHTML=EDGES.map(function(e){var c=document.createElementNS('http://www.w3.org/2000/svg','path');"
+                "c.setAttribute('d',bez(e[0],e[1],e[2],e[3]));c.setAttribute('class','wpath');"
+                "c.setAttribute('stroke',e[4]);if(e[5])c.setAttribute('stroke-dasharray','6,5');return c.outerHTML;}).join('');"
+                "NODES.forEach(function(n){var d=document.createElement('div');d.className='node sev-'+n.sev;"
+                "d.style.left=n.x+'px';d.style.top=n.y+'px';"
+                "d.innerHTML=\"<div class='bar'></div><div class='bd'><div class='nt'>\"+esc(n.t)+\"</div><div class='ns'>\"+esc(n.s)+\"</div></div>\""
+                "+(n.pts?\"<div class='pts'>+\"+n.pts+\"</div>\":'');"
+                "d.addEventListener('mousemove',function(ev){tip.style.display='block';tip.innerHTML=esc(n.tip);"
+                "tip.style.left=(ev.clientX+14)+'px';tip.style.top=(ev.clientY+14)+'px';});"
+                "d.addEventListener('mouseleave',function(){tip.style.display='none';});"
+                "d.addEventListener('click',function(){showMenu(n);});"
+                "world.appendChild(d);});"
+                "function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}"
+                "function showMenu(n){var m=document.getElementById('menu'),mt=document.getElementById('mt'),mb=document.getElementById('mb');"
+                "mt.textContent=n.t+'  +'+n.pts;var h='';"
+                "if(n.kind==='main'){h=EVELIST.map(function(e){return \"<div class='mi'><span class='p'>+\"+e.p+\"</span><div class='t'>\"+e.type+'  '+e.t+\"</div><div class='d'>\"+esc(e.d)+\"</div></div>\"}).join('');}"
+                "else if(DETAILS[n.t]){h=DETAILS[n.t].map(function(e){return \"<div class='mi'><span class='p'>+\"+e[2]+\"</span><div class='t'>\"+e[0]+\"</div><div class='d'>\"+esc(e[1])+\"</div></div>\"}).join('');}"
+                "else{h=\"<div class='mi'><div class='d'>\"+esc(n.tip)+\"</div></div>\";}"
+                "mb.innerHTML=h;m.style.display='block';}"
+                "var drag=null;"
+                "vp.addEventListener('mousedown',function(e){if(e.target.closest('.node'))return;drag={x:e.clientX,y:e.clientY,tx:tx,ty:ty};vp.classList.add('drag');});"
+                "window.addEventListener('mousemove',function(e){if(!drag)return;tx=drag.tx+(e.clientX-drag.x);ty=drag.ty+(e.clientY-drag.y);apply();});"
+                "window.addEventListener('mouseup',function(){drag=null;vp.classList.remove('drag');});"
+                "vp.addEventListener('wheel',function(e){e.preventDefault();zoom(e.deltaY<0?1.12:0.89);},{passive:false});"
+                "apply();"
+                "</script></body></html>")
         fname = "chain_{}_{}.html".format(int(pid or 0), time.strftime('%Y%m%d_%H%M%S'))
         fpath = os.path.join(LINE_REPORT_DIR, fname)
         with open(fpath, 'w', encoding='utf-8') as f:
             f.write(html)
+        global _g_last_chain_html
+        _g_last_chain_html = fpath
         _log("[EDR溯源] 攻击链报告已生成: {}".format(fpath))
         _edr_log("REPORT {}({}) -> {} ({} events)".format(name, pid, fpath, len(rows)))
         # 只保留最近 100 份报告
@@ -635,6 +1120,8 @@ def _edr_enforce_chain(pid):
         rec['enforced'] = True
     name = rec.get('name') or 'Unknown.exe'
     path = rec.get('path') or ''
+    if path:
+        _tag_threat_path(path, 'EDR行为判恶: {}'.format(name))
     _log("[EDR] 行为评分达阈值, 还原攻击链: {}({}) 主进程:{}({})".format(
         name, pid, name, ledger_key))
     _edr_log("ENFORCE origin={}({}) root={}({}) score={} -> terminate chain + rollback + report | {}".format(
@@ -696,7 +1183,8 @@ def _edr_enforce_chain(pid):
                          action='terminated', extra='评分达{}触发整链回滚'.format(EDR_SCORE_THRESHOLD))
     _edr_report_chain(pid, name, path, [('Score threshold reached - chain rolled back', 0)],
                       action='rolled back')
-    _notify("Threat Block", "Threat Block {}".format(name))
+    _notify("Threat Blocked", "Threat Blocked {}".format(name),
+            pid=pid, name=name, path=path)
     # 清账(账本在主进程键下)
     try:
         with _g_edr_scores_lock:
@@ -733,12 +1221,39 @@ _QUAR_JUDGE_EXTS = ('.sys', '.dll')   # 只有驱动和DLL释放判毒(其余直
 # 监控前已存在的DLL一律不自动动(引擎误判旧DLL时直接隔离会导致正常软件损坏)
 _g_dropscan_start_ts = time.time()
 
-def _quarantine_new_drop(filepath, vt=''):
-    """恶意释放文件处置: DLL/OCX -> 隔离(与驱动一致, 可还原); 其余 -> 删除。
-    硬闸门: 创建时间早于监控启动(60s容差)的文件绝不自动处置 —— 只动新落盘的。"""
+# 威胁标签: 被任意主防/行为拦截终止过的进程镜像路径 -> 若重生, 循环击杀(DefenseMode 不豁免)
+_g_threat_tags = {}
+_g_threat_tags_lock = threading.Lock()
+
+def _tag_threat_path(path, tag='Threat'):
     try:
+        p = os.path.normcase(os.path.normpath(str(path or '')))
+        if not p or not p.endswith(('.exe', '.com', '.scr', '.pif')):
+            return
+        with _g_threat_tags_lock:
+            if p in _g_threat_tags:
+                return
+            _g_threat_tags[p] = tag
+        _log("[威胁标签] {}: {} (循环击杀已启用)".format(tag, p))
+    except Exception:
+        pass
+
+def _is_threat_tagged(path):
+    try:
+        p = os.path.normcase(os.path.normpath(str(path or '')))
+        return bool(p) and p in _g_threat_tags
+    except Exception:
+        return False
+
+def _quarantine_new_drop(filepath, vt='', enforce=False):
+    """恶意释放文件处置: DLL/OCX/SYS/EXE/TMP/COM -> 隔离(与驱动一致, 可还原); 其余 -> 删除。
+    硬闸门: 创建时间早于监控启动(60s容差)的文件绝不自动处置 —— 只动新落盘的。
+    enforce=True(引擎/模型已有判毒结论)时跳过时间闸门: 判毒是强信号, 旧文件同样隔离。"""
+    try:
+        if _in_engine_dir(filepath) or _in_infrasonic_dir(filepath):
+            return 'kept'
         ext = os.path.splitext(filepath)[1].lower()
-        if ext not in ('.dll', '.ocx'):
+        if ext not in ('.dll', '.ocx', '.sys', '.exe', '.tmp', '.com'):
             try:
                 os.remove(filepath)
                 return 'removed'
@@ -748,13 +1263,13 @@ def _quarantine_new_drop(filepath, vt=''):
             created = os.path.getctime(filepath)
         except Exception:
             created = time.time()
-        if created < _g_dropscan_start_ts - 60:
+        if not enforce and created < _g_dropscan_start_ts - 60:
             _log("[隔离-保守] {} 早于监控启动已存在, 不自动隔离(如需处置请手动): {}".format(ext, filepath))
             return 'kept'
-        dest = _quarantine_file(filepath, vt or 'Malicious DLL')
+        dest = _quarantine_file(filepath, vt or 'Malicious Drop')
         if dest:
-            _log("[隔离-文件] 恶意DLL已隔离(可还原): {} [{}]".format(filepath, vt))
-            _scan_log("[隔离-DLL] {} [{}]".format(filepath, vt))
+            _log("[隔离-文件] 恶意释放文件已隔离(可还原): {} [{}]".format(filepath, vt))
+            _scan_log("[隔离-文件] {} [{}]".format(filepath, vt))
             _notify("Threat Quarantined", "Threat Quarantined {}".format(os.path.basename(filepath)))
             return 'quarantined'
         return 'kept'
@@ -772,6 +1287,8 @@ def _rollback_chain_files(pids, notify=True):
     for fp in targets:
         try:
             if not fp or not os.path.exists(fp):
+                continue
+            if _in_engine_dir(fp) or _in_infrasonic_dir(fp):
                 continue
             fname = os.path.basename(fp)
             ext = os.path.splitext(fp)[1].lower()
@@ -830,7 +1347,7 @@ def _rollback_chain_files(pids, notify=True):
 
 # ============================ 隔离区命令行 (--quarantinelist / --quarantinedel / --quarantinemove) ============================
 # 打包为 --noconsole 后 stdout 不可见: AttachConsole 附加父终端 + 全部输出双写 Main/QuarantineCmd.txt
-_QUAR_CLI_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Main', 'QuarantineCmd.txt')
+_QUAR_CLI_LOG = os.path.join(BASE_DIR, 'Main', 'QuarantineCmd.txt')
 
 def _cli_out(msg):
     print(msg)
@@ -1032,8 +1549,46 @@ def _show_log_dialog(title, log_lines):
     layout.addWidget(btn)
     dlg.exec()
 
-_UI_DEBUG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Main', 'UIdebug.txt')
+_UI_DEBUG_FILE = os.path.join(BASE_DIR, 'Main', 'UIdebug.txt')
 os.makedirs(os.path.dirname(_UI_DEBUG_FILE), exist_ok=True)
+
+# ---- 退出诊断探针(临时): 定位静默退出, 稳定后移除 ----
+try:
+    import faulthandler as _fh_diag
+    _fh_diag.enable(open(os.path.join(BASE_DIR, 'Main', 'fault.log'), 'w', encoding='utf-8'))
+except Exception:
+    pass
+
+def _diag_excepthook(args):
+    try:
+        thr = getattr(args, 'thread', None)
+        with open(os.path.join(BASE_DIR, 'Main', 'exit.log'), 'a', encoding='utf-8') as _f:
+            _f.write('{} [EXC thread={}] {}\n'.format(
+                time.strftime('%H:%M:%S'), thr.name if thr else 'main',
+                ''.join(traceback.format_exception(args.exc_type, args.exc_value, args.exc_traceback))))
+    except Exception:
+        pass
+
+def _diag_atexit():
+    try:
+        with open(os.path.join(BASE_DIR, 'Main', 'exit.log'), 'a', encoding='utf-8') as _f:
+            import threading as _th
+            _f.write('{} [atexit-clean] threads: {}\n'.format(
+                time.strftime('%H:%M:%S'),
+                ', '.join(t.name for t in _th.enumerate())))
+    except Exception:
+        pass
+
+try:
+    sys.excepthook = _diag_excepthook
+    threading.excepthook = _diag_excepthook
+    atexit.register(_diag_atexit)
+    # 活体取证: 每30s导出全线程栈快照(外部TerminateProcess时, 最后一份=死亡现场)
+    _fh_diag.dump_traceback_later(30, repeat=True, file=open(
+        os.path.join(BASE_DIR, 'Main', 'hb_trace.log'), 'w', encoding='utf-8'))
+except Exception:
+    pass
+# ---- 探针结束 ----
 
 def _log(msg):
     global _g_log_lines
@@ -1084,11 +1639,29 @@ def _endpoint_log(msg):
 
 # ===== 托盘通知(全局, 线程安全: 经 _gui_queue 回 GUI 线程) =====
 _g_tray = None
-SETTINGS_JSON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'settings.json')
+_g_last_chain_html = None
+_g_last_alert = {}
+_g_last_alert_lock = threading.Lock()
+SETTINGS_JSON_PATH = os.path.join(BASE_DIR, 'settings.json')
+# 通知环形缓冲(LocalHost控制台明细用): 最新200条, 含时间/标题/内容/进程/PID/路径
+import collections as _collections
+_g_notifications = _collections.deque(maxlen=200)
+_g_notifications_lock = threading.Lock()
 
-def _notify(title, body):
-    """托盘气泡通知(任意线程可调)。Name 固定 SevenEndPointSecurity, 图标为 Icon/SevenEndpoint.ico。"""
+def _notify(title, body, pid=None, name=None, path=None):
+    """托盘气泡通知(任意线程可调)。Name 固定 SevenEndPointSecurity, 图标为 Icon/SevenEndpoint.ico。
+    点击气泡弹出威胁详情(含'打开拦截链'按钮, 展示 Line/ 下最新链 HTML)。
+    不去重: 重复拦截/重复启动全部入列(用户要求全量)。"""
     body = str(body)
+    _ts = time.time()
+    with _g_notifications_lock:
+        _g_notifications.appendleft({
+            'time': time.strftime("%H:%M:%S"), 'title': str(title), 'body': body,
+            'pid': int(pid or 0), 'name': name or '', 'path': path or '',
+            '_ts': _ts})
+    with _g_last_alert_lock:
+        _g_last_alert.update({'title': title, 'body': body,
+                              'pid': pid or 0, 'name': name or '', 'path': path or ''})
     if _g_tray is not None:
         def _do():
             try:
@@ -1101,6 +1674,348 @@ def _notify(title, body):
             pass
     _log("[通知] {}: {}".format(title, body))
 
+def _on_tray_message_clicked():
+    try:
+        with _g_last_alert_lock:
+            info = dict(_g_last_alert)
+        chain = _g_last_chain_html
+        dlg = QDialog()
+        dlg.setWindowTitle("Threat Details")
+        dlg.resize(560, 300)
+        lay = QVBoxLayout(dlg)
+        t = QLabel("<b style='font-size:15px'>{}</b><br><br>{}".format(
+            _html_esc(info.get('title') or ''), _html_esc(info.get('body') or '')))
+        t.setWordWrap(True)
+        lay.addWidget(t)
+        rows = [("Process", info.get('name') or '-'), ("PID", str(info.get('pid') or '-')),
+                ("Path", info.get('path') or '-')]
+        for k, v in rows:
+            r = QLabel("<b>{}:</b> {}".format(k, _html_esc(v)))
+            r.setWordWrap(True)
+            r.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            lay.addWidget(r)
+        lay.addStretch()
+        btns = QHBoxLayout()
+        b_chain = QPushButton("Open Attack Chain")
+        b_chain.setEnabled(bool(chain and os.path.exists(chain)))
+        b_chain.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b_close = QPushButton("Close")
+        b_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        def _open_chain():
+            try:
+                import webbrowser
+                webbrowser.open('file://' + (chain or '').replace('\\', '/'))
+            except Exception as e:
+                _log("[详情] 打开拦截链失败: {}".format(e))
+        b_chain.clicked.connect(_open_chain)
+        b_close.clicked.connect(dlg.accept)
+        btns.addStretch()
+        btns.addWidget(b_chain)
+        btns.addWidget(b_close)
+        lay.addLayout(btns)
+        dlg.exec()
+    except Exception as e:
+        _log("[详情] 威胁详情弹窗异常: {}".format(e))
+
+# ===== LocalHost 控制台(仅本机 127.0.0.1, 浏览器管理设置/通知明细/日志; HTML外置 Web/console.html) =====
+from http.server import BaseHTTPRequestHandler as _BaseHTTPHandler, ThreadingHTTPServer as _ThreadingHTTPServer
+
+_CONSOLE_PORT_BASE = 26080
+_CONSOLE_HTML = os.path.join(BASE_DIR, 'Web', 'console.html')
+_ICON_DIR = os.path.join(BASE_DIR, 'Icon')
+_LINE_DIR = os.path.join(BASE_DIR, 'Line')
+_G_START_TIME = [time.time()]
+# 设置页强制开启的键(与UI开关一致), 控制台同样不允许关闭
+_CONSOLE_FORCED_ON = {'realtime_protect'}
+# 控制台可设置的模型选项(默认 Xdows Flash)
+_CONSOLE_MODEL_OPTIONS = ('xdows-flash', 'xdows-standard', 'xdows-pro', 'xdows-adaptive', 'tanka2', 'seven')
+
+def _console_list_chains(limit=30):
+    """Line/ 下攻击链报告(最新在前)。"""
+    try:
+        fs = [f for f in os.listdir(_LINE_DIR) if f.lower().endswith('.html')]
+        fs.sort(key=lambda f: os.path.getmtime(os.path.join(_LINE_DIR, f)), reverse=True)
+        out = []
+        for f in fs[:limit]:
+            try:
+                out.append({'file': f, 'mtime': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(os.path.join(_LINE_DIR, f))))})
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+def _console_proc_info(pid):
+    """控制台通知详情: 进程存活/名称/路径/命令行/网络连接(按需查询)。"""
+    try:
+        import ctypes
+        pid = int(pid or 0)
+        info = {'pid': pid, 'alive': False, 'name': '', 'path': '', 'cmdline': '', 'net': []}
+        if pid <= 0:
+            return info
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        PROCESS_VM_READ = 0x0010
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, False, pid & 0xFFFFFFFF)
+        if h and h != ctypes.c_void_p(-1).value:
+            info['alive'] = True
+            try:
+                n = ctypes.c_uint32(1024)
+                buf = ctypes.create_unicode_buffer(1024)
+                if k32.QueryFullProcessImageNameW(ctypes.c_void_p(h), 0, buf, ctypes.byref(n)):
+                    info['path'] = buf.value
+                    info['name'] = os.path.basename(buf.value)
+            except Exception:
+                pass
+            # 命令行: NtQueryInformationProcess -> PEB -> RTL_USER_PROCESS_PARAMETERS (仅原生源)
+            try:
+                ntdll = ctypes.windll.ntdll
+                peb = ctypes.c_void_p()
+                if ntdll.NtQueryInformationProcess(ctypes.c_void_p(h), 0, ctypes.byref(peb), ctypes.sizeof(peb), None) == 0 and peb.value:
+                    params = ctypes.c_void_p()
+                    if k32.ReadProcessMemory(ctypes.c_void_p(h), ctypes.c_void_p(peb.value + 0x20),
+                                             ctypes.byref(params), ctypes.sizeof(params), None) and params.value:
+                        ln = ctypes.c_ushort()
+                        ptr = ctypes.c_void_p()
+                        if k32.ReadProcessMemory(ctypes.c_void_p(h), ctypes.c_void_p(params.value + 0x70),
+                                                 ctypes.byref(ln), ctypes.sizeof(ln), None) and 0 < ln.value <= 65536:
+                            if k32.ReadProcessMemory(ctypes.c_void_p(h), ctypes.c_void_p(params.value + 0x78),
+                                                     ctypes.byref(ptr), ctypes.sizeof(ptr), None) and ptr.value:
+                                cb = ctypes.create_unicode_buffer(ln.value // 2 + 1)
+                                if k32.ReadProcessMemory(ctypes.c_void_p(h), ctypes.c_void_p(ptr.value),
+                                                         cb, ln.value, None):
+                                    info['cmdline'] = cb.value
+            except Exception:
+                pass
+            k32.CloseHandle(ctypes.c_void_p(h))
+        else:
+            # 已退出: 通知里记录过名字的话由前端显示, 这里保持空
+            info['alive'] = False
+        # 网络连接: netstat -ano 按PID过滤(按需一次性查询)
+        try:
+            r = subprocess.run(['netstat', '-ano'], capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', timeout=10,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            for line in (r.stdout or '').splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[-1] == str(pid):
+                    info['net'].append({'proto': parts[0], 'local': parts[1],
+                                        'remote': parts[2] if len(parts) > 3 else '',
+                                        'state': parts[3] if len(parts) > 4 else ''})
+                    if len(info['net']) >= 40:
+                        break
+        except Exception:
+            pass
+        return info
+    except Exception:
+        return {'pid': 0, 'alive': False, 'name': '', 'path': '', 'cmdline': '', 'net': []}
+
+class _ConsoleHandler(_BaseHTTPHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def _json(self, obj, code=200):
+        try:
+            data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+            self.send_response(code)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception:
+            pass
+
+    def _file_bytes(self, fpath, ctype):
+        try:
+            with open(fpath, 'rb') as f:
+                data = f.read()
+            self.send_response(200)
+            self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+            self.wfile.write(data)
+        except Exception:
+            self.send_response(404)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+
+    def do_GET(self):
+        try:
+            p = self.path.split('?')[0]
+            if p.startswith('/api/chains'):
+                # 攻击链报告查询: /api/chains?pid=N -> Line/chain_<pid>_*.html 列表(新->旧)
+                try:
+                    qs = dict(x.split('=', 1) for x in (self.path.split('?', 1)[1] if '?' in self.path else '').split('&') if '=' in x)
+                except Exception:
+                    qs = {}
+                chains = []
+                try:
+                    _pid = int(qs.get('pid', '0') or 0)
+                except Exception:
+                    _pid = 0
+                if _pid > 0 and os.path.isdir(LINE_REPORT_DIR):
+                    pref = 'chain_{}_'.format(_pid)
+                    try:
+                        for f in os.listdir(LINE_REPORT_DIR):
+                            if f.startswith(pref) and f.endswith('.html'):
+                                fp = os.path.join(LINE_REPORT_DIR, f)
+                                chains.append({'file': f, 'mtime': time.strftime(
+                                    '%Y-%m-%d %H:%M:%S', time.localtime(os.path.getmtime(fp)))})
+                    except Exception:
+                        pass
+                    chains.sort(key=lambda c: c['mtime'], reverse=True)
+                self._json({'ok': True, 'pid': _pid, 'chains': chains[:10]})
+                return
+            if p.startswith('/line/'):
+                # 攻击链报告静态服务(仅 Line 目录下的 .html, 防目录穿越)
+                fname = os.path.basename(p[len('/line/'):])
+                if fname.endswith('.html'):
+                    fp = os.path.join(LINE_REPORT_DIR, fname)
+                    if os.path.isfile(fp):
+                        data = open(fp, 'rb').read()
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'text/html; charset=utf-8')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+                self._json({'ok': False, 'error': 'not found'}, 404)
+                return
+            if p.startswith('/api/proc'):
+                try:
+                    qs = dict(x.split('=', 1) for x in (p.split('?', 1)[1] if '?' in p else '').split('&') if '=' in x)
+                except Exception:
+                    qs = {}
+                self._json(_console_proc_info(qs.get('pid', '0')))
+                return
+            if p.startswith('/api/state'):
+                with _g_notifications_lock:
+                    _nots = list(_g_notifications)
+                try:
+                    _inter = list(_g_intercept_records)[-100:]
+                except Exception:
+                    _inter = []
+                try:
+                    _logs = list(_g_log_lines)[-300:]
+                except Exception:
+                    _logs = []
+                self._json({'ok': True,
+                            'settings': dict(g_settings),
+                            'notifications': _nots,
+                            'interceptions': _inter,
+                            'chains': _console_list_chains(),
+                            'logs': _logs,
+                            'stats': {
+                                'uptime_sec': int(time.time() - _G_START_TIME[0]),
+                                'notification_count': len(_nots),
+                                'interception_count': len(_inter),
+                                'defense_mode': bool(g_settings.get('DefenseMode', False)),
+                                'product': 'SevenEndpointSecurity'},
+                            })
+                return
+            if p.startswith('/icon/'):
+                name = os.path.basename(p[len('/icon/'):])
+                if re.fullmatch(r'[A-Za-z0-9_.-]+', name or '') and name.lower().endswith(('.svg', '.png', '.ico')):
+                    ct = {'.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon'}[os.path.splitext(name)[1].lower()]
+                    self._file_bytes(os.path.join(_ICON_DIR, name), ct)
+                else:
+                    self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers()
+                return
+            if p.startswith('/chain/'):
+                name = os.path.basename(p[len('/chain/'):])
+                if re.fullmatch(r'[A-Za-z0-9_.-]+', name or '') and name.lower().endswith('.html'):
+                    self._file_bytes(os.path.join(_LINE_DIR, name), 'text/html; charset=utf-8')
+                else:
+                    self.send_response(404); self.send_header('Content-Length', '0'); self.end_headers()
+                return
+            # 其余路径一律回控制台页面(HTML外置: BASE_DIR/Web/console.html)
+            try:
+                with open(_CONSOLE_HTML, 'rb') as f:
+                    data = f.read()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception:
+                data = ('<html><body style="font-family:sans-serif"><h3>Console HTML missing</h3>'
+                        '<p>Expected: {}</p></body></html>'.format(_CONSOLE_HTML)).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+        except Exception:
+            pass
+
+    def do_POST(self):
+        try:
+            if not self.path.startswith('/api/settings'):
+                self._json({'ok': False, 'error': 'unknown endpoint'}, 404)
+                return
+            n = int(self.headers.get('Content-Length') or 0)
+            raw = self.rfile.read(n).decode('utf-8', errors='replace')
+            data = json.loads(raw or '{}')
+            if not isinstance(data, dict):
+                self._json({'ok': False, 'error': 'bad body'}, 400)
+                return
+            applied = {}
+            for k, v in data.items():
+                if k == 'scan_model':
+                    if str(v).lower() in _CONSOLE_MODEL_OPTIONS and g_settings.get('scan_model') != str(v).lower():
+                        g_settings['scan_model'] = str(v).lower()
+                        applied[k] = g_settings['scan_model']
+                        _log("[设置] 扫描模型: {} (切换后下次扫描自动拉起新Worker)".format(g_settings['scan_model']))
+                    continue
+                if k not in g_settings or not isinstance(v, bool):
+                    continue
+                if k in _CONSOLE_FORCED_ON and not v:
+                    continue
+                g_settings[k] = bool(v)
+                applied[k] = bool(v)
+                if k == 'autostart_enabled':
+                    _apply_autostart(bool(v))
+                if k in ('file_protect', 'file_modify_monitor'):
+                    try:
+                        fm = getattr(g_window, '_file_monitor', None)
+                        if fm:
+                            fm._send_command({"cmd": "set_config", "key": k, "value": bool(v)})
+                    except Exception:
+                        pass
+            try:
+                _save_settings_json()
+            except Exception:
+                pass
+            _log("[控制台] 设置变更: {}".format(applied if applied else '无有效键'))
+            self._json({'ok': True, 'applied': applied})
+        except Exception as e:
+            try:
+                self._json({'ok': False, 'error': str(e)}, 500)
+            except Exception:
+                pass
+
+def _console_start():
+    """启动 LocalHost 控制台(仅绑定127.0.0.1, 端口26080起顺延)。"""
+    _G_START_TIME[0] = time.time()
+    srv = None
+    port = _CONSOLE_PORT_BASE
+    for _ in range(10):
+        try:
+            srv = _ThreadingHTTPServer(('127.0.0.1', port), _ConsoleHandler)
+            break
+        except OSError:
+            port += 1
+    if srv is None:
+        _log("[控制台] 端口 {}~{} 均被占用, 本地控制台未启动".format(_CONSOLE_PORT_BASE, port))
+        return
+    threading.Thread(target=srv.serve_forever, daemon=True, name='LocalConsole').start()
+    _log("[控制台] 已启动: http://127.0.0.1:{} (仅本机可访问, 可查看通知明细/管理设置)".format(port))
+
+
 def _load_settings_json():
     """启动时从 settings.json 恢复设置(仅接受 g_settings 已存在的键)。"""
     try:
@@ -1108,10 +2023,12 @@ def _load_settings_json():
             with open(SETTINGS_JSON_PATH, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if isinstance(data, dict):
+                data.pop('wsc_takeover', None)
                 for k, v in data.items():
                     if k in g_settings:
                         g_settings[k] = v
                 _log("[设置] 已从 settings.json 恢复 {} 项".format(len(data)))
+                _log("[DefenseMode] 当前状态: {}".format("已启用(进程拦截停用,纯主防+文件防护)" if g_settings.get("DefenseMode", False) else "关闭(正常拦截)"))
     except Exception as e:
         _log("[设置] settings.json 读取失败: {}".format(e))
 
@@ -1122,6 +2039,37 @@ def _save_settings_json():
             json.dump(g_settings, f, indent=2, ensure_ascii=False)
     except Exception as e:
         _log("[设置] settings.json 写入失败: {}".format(e))
+
+
+_AUTOSTART_RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_AUTOSTART_VALUE_NAME = "SevenEndPointSecurity"
+
+def _autostart_command():
+    """自启动命令: 打包版=exe本体; 脚本运行=解释器+脚本路径(引号包裹, 兼容空格/中文路径)。"""
+    if getattr(sys, 'frozen', False):
+        return '"{}"'.format(sys.executable)
+    return '"{}" "{}"'.format(sys.executable, os.path.abspath(__file__))
+
+def _apply_autostart(enabled):
+    """应用 autostart_enabled 设置: 写/删 HKCU Run 键。返回是否生效。"""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _AUTOSTART_RUN_KEY, 0,
+                            winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE) as k:
+            if enabled:
+                cmd = _autostart_command()
+                winreg.SetValueEx(k, _AUTOSTART_VALUE_NAME, 0, winreg.REG_SZ, cmd)
+                _log("[自启动] 已写入 HKCU Run: {} = {}".format(_AUTOSTART_VALUE_NAME, cmd))
+            else:
+                try:
+                    winreg.DeleteValue(k, _AUTOSTART_VALUE_NAME)
+                    _log("[自启动] 已移除 HKCU Run: {}".format(_AUTOSTART_VALUE_NAME))
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception as e:
+        _log("[自启动] 设置失败: {}".format(e))
+        return False
 
 
 CONFIG = {
@@ -1169,6 +2117,368 @@ if not os.path.isdir(SEVENGINE_DIR) and getattr(sys, 'frozen', False):
     SEVENGINE_DIR = os.path.join(os.path.dirname(sys.executable), "SevenEngine")
 SEVENGINE_EXE = os.path.join(SEVENGINE_DIR, "SevenEngine.exe")
 
+def _in_engine_dir(path):
+    try:
+        p = os.path.normpath(str(path or '')).lower().replace('/', '\\')
+        e = os.path.normpath(SEVENGINE_DIR).lower().replace('/', '\\')
+        return p == e or p.startswith(e + '\\')
+    except Exception:
+        return False
+
+INFRASONIC_DIR = os.path.join(BASE_DIR, "Infrasonic")
+DEFENDNOT_LOADER = os.path.join(INFRASONIC_DIR, "defendnot-loader.exe")
+WSC_AV_NAME = "SevenEndPointSecurity"
+_INFRASONIC_ASSETS = {'defendnot-loader.exe', 'defendnot.dll', 'defendnot-loader.pdb',
+                      'defendnot.pdb', 'extra-strip.bat'}
+
+def _in_infrasonic_dir(path):
+    try:
+        p = os.path.normpath(str(path or '')).lower().replace('/', '\\')
+        e = os.path.normpath(INFRASONIC_DIR).lower().replace('/', '\\')
+        return p == e or p.startswith(e + '\\')
+    except Exception:
+        return False
+
+def _wsc_takeover(enable):
+    """安全中心接管: defendnot-loader 经 WSC API 注册/注销 SevenEndPointSecurity。
+    注册后 Windows Defender 让位; 需管理员。--disable-autorun: 持久化由本程序
+    启动时的重注册承担, 不留独立计划任务。"""
+    def _run():
+        try:
+            if not os.path.exists(DEFENDNOT_LOADER):
+                _log("[安全中心] defendnot-loader 不存在: {}".format(DEFENDNOT_LOADER))
+                return
+            args = [DEFENDNOT_LOADER, "--name", WSC_AV_NAME, "--silent", "--disable-autorun"]
+            if not enable:
+                args.append("--disable")
+            _env = dict(os.environ)
+            _env['PYTHONIOENCODING'] = 'utf-8'
+            _p = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, encoding='utf-8',
+                                  errors='replace', env=_env, cwd=INFRASONIC_DIR,
+                                  creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            try:
+                _p.stdin.write(" " * 4 + "\n")
+                _p.stdin.flush()
+            except Exception:
+                pass
+            try:
+                _out, _ = _p.communicate(timeout=120)
+            except subprocess.TimeoutExpired:
+                _p.kill()
+                _out = ''
+            _log("[安全中心] {}完成 (rc={}) {}".format(
+                "注册" if enable else "注销", _p.returncode, (_out or '').strip()[:200]))
+        except Exception as e:
+            _log("[安全中心] 调用失败: {}".format(e))
+    threading.Thread(target=_run, daemon=True, name='WscTakeover').start()
+
+PPL_TOOL_DIR = os.path.join(INFRASONIC_DIR, "Driver")
+KVC_EXE = os.path.join(PPL_TOOL_DIR, "kvc.exe")
+_g_ppl_applied = set()
+_g_ppl_lock = threading.Lock()
+_g_ppl_capped = [False]
+_g_pool_ready = threading.Event()
+
+_g_ppl_elev_warned = set()
+
+def _pid_is_elevated(pid):
+    """True=提权 / False=确认非提权 / None=无法判定(不跳过保护尝试)"""
+    try:
+        import ctypes
+        from ctypes import wintypes as _wt
+        k32 = ctypes.windll.kernel32
+        adv = ctypes.windll.advapi32
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [_wt.DWORD, _wt.BOOL, _wt.DWORD]
+        h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid) & 0xFFFFFFFF)
+        if not h or h == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            adv.OpenProcessToken.argtypes = [ctypes.c_void_p, _wt.DWORD, ctypes.POINTER(_wt.HANDLE)]
+            tok = _wt.HANDLE()
+            if not adv.OpenProcessToken(ctypes.c_void_p(h), 0x0008, ctypes.byref(tok)):
+                return None
+            try:
+                adv.GetTokenInformation.argtypes = [ctypes.c_void_p, _wt.DWORD,
+                                                    ctypes.c_void_p, _wt.DWORD, ctypes.POINTER(_wt.DWORD)]
+                elev = _wt.DWORD(0)
+                ret = _wt.DWORD(0)
+                if not adv.GetTokenInformation(ctypes.c_void_p(tok.value or 0), 20,
+                                               ctypes.byref(elev), ctypes.sizeof(elev), ctypes.byref(ret)):
+                    return None
+                return bool(elev.value)
+            finally:
+                k32.CloseHandle(ctypes.c_void_p(tok.value or 0))
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    except Exception:
+        return None
+
+_g_ppl_fail_streak = [0]      # kvc连续失败次数(驱动不可用时熔断, 避免隔离期间连环spawn kvc拖慢处置)
+_g_ppl_broken = [False]       # True=本次运行禁用PPL(下次启动重试)
+
+def _ppl_protect_pid(pid):
+    try:
+        pid = int(pid or 0)
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    if _g_ppl_broken[0]:
+        return False
+    with _g_ppl_lock:
+        if pid in _g_ppl_applied:
+            return True
+    for args in (("PPL", "Antimalware"), ("PP", "Antimalware")):
+        try:
+            r = subprocess.run([KVC_EXE, "protect", str(pid), args[0], args[1]],
+                               capture_output=True, text=True, encoding='utf-8', errors='replace',
+                               timeout=120, cwd=PPL_TOOL_DIR,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            _ok = (r.returncode == 0)
+            _log("[PPL] protect {} {} {} -> rc={} {}".format(
+                pid, args[0], args[1], r.returncode,
+                ((r.stdout or '') + (r.stderr or '')).strip()[:120]))
+            if _ok:
+                with _g_ppl_lock:
+                    _g_ppl_applied.add(pid)
+                _g_ppl_fail_streak[0] = 0
+                return True
+            # 驱动加载失败(rc=2): 连续4次判定kvc不可用, 熔断本次运行, 不再拖累隔离/拉起
+            _g_ppl_fail_streak[0] += 1
+            if _g_ppl_fail_streak[0] >= 4 and not _g_ppl_broken[0]:
+                _g_ppl_broken[0] = True
+                _log("[PPL] kvc驱动连续加载失败({}次), 本次运行禁用PPL保护(不再调用kvc), 重启后自动重试。".format(
+                    _g_ppl_fail_streak[0]))
+                return False
+        except Exception as e:
+            _log("[PPL] protect {} 失败: {}".format(pid, e))
+            _g_ppl_fail_streak[0] += 1
+    return False
+
+def _ppl_unprotect_pid(pid):
+    try:
+        r = subprocess.run([KVC_EXE, "unprotect", str(pid)],
+                           capture_output=True, text=True, encoding='utf-8', errors='replace',
+                           timeout=120, cwd=PPL_TOOL_DIR,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        with _g_ppl_lock:
+            _g_ppl_applied.discard(int(pid or 0))
+        return r.returncode == 0
+    except Exception:
+        return False
+
+def _ppl_spawn_retry(spawn_fn, tag=''):
+    try:
+        return spawn_fn()
+    except Exception as e:
+        _log("[PPL] {} 创建失败: {}".format(tag, e))
+        return None
+
+def _proc_age_seconds(pid):
+    try:
+        import ctypes
+        from ctypes import wintypes as _wt
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [_wt.DWORD, _wt.BOOL, _wt.DWORD]
+        h = k32.OpenProcess(0x1000, False, int(pid) & 0xFFFFFFFF)
+        if not h or h == ctypes.c_void_p(-1).value:
+            return None
+        try:
+            k32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [_wt.FILETIME] * 4
+            ct, et, kt, ut = _wt.FILETIME(), _wt.FILETIME(), _wt.FILETIME(), _wt.FILETIME()
+            if not k32.GetProcessTimes(ctypes.c_void_p(h), ctypes.byref(ct), ctypes.byref(et),
+                                       ctypes.byref(kt), ctypes.byref(ut)):
+                return None
+            import datetime
+            ts = (ct.dwHighDateTime << 32) | ct.dwLowDateTime
+            if ts <= 0:
+                return None
+            created = datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=ts // 10)
+            return (datetime.datetime.now() - created).total_seconds()
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    except Exception:
+        return None
+
+def _ppl_child_pids():
+    try:
+        import ctypes
+        from ctypes import wintypes as _wt
+        k32 = ctypes.windll.kernel32
+        k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+
+        class _PE32(ctypes.Structure):
+            _fields_ = [("dwSize", _wt.DWORD), ("cntUsage", _wt.DWORD),
+                        ("th32ProcessID", _wt.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", _wt.DWORD), ("cntThreads", _wt.DWORD),
+                        ("th32ParentProcessID", _wt.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", _wt.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+        hs = k32.CreateToolhelp32Snapshot(0x2, 0)
+        if not hs or hs == ctypes.c_void_p(-1).value:
+            return []
+        pairs = []
+        try:
+            pe = _PE32()
+            pe.dwSize = ctypes.sizeof(_PE32)
+            me = os.getpid()
+            ok = k32.Process32FirstW(hs, ctypes.byref(pe))
+            while ok:
+                pairs.append((int(pe.th32ProcessID), int(pe.th32ParentProcessID)))
+                ok = k32.Process32NextW(hs, ctypes.byref(pe))
+        finally:
+            k32.CloseHandle(hs)
+        me = os.getpid()
+        kids = [pid for pid, pp in pairs if pp == me]
+        # 结论性修复(bootloader竞态): onefile打包的子进程是"bootloader→真身"两层,
+        # bootloader在有真身之前绝不能PPL(否则其真身创建被内核签名策略拒绝,
+        # PyInstaller弹"Failed to create child process")。只保护:
+        # ①已有真身的bootloader的"真身" ②存在>15s仍无真身的孤儿(确认不再生成)
+        kids_of = {}
+        for p, pp in pairs:
+            kids_of.setdefault(pp, []).append(p)
+        out = []
+        for pid in kids:
+            gk = kids_of.get(pid, [])
+            if gk:
+                out.extend(gk)
+            else:
+                age = _proc_age_seconds(pid)
+                if age is not None and age > 15.0:
+                    out.append(pid)
+        return out
+    except Exception:
+        return []
+
+def _main_alive(pid):
+    """主进程存活检测: 副进程以此决定生命周期(独立于stdin管道, 随主进程退出)。"""
+    try:
+        import ctypes
+        pid = int(pid or 0)
+        if pid <= 0:
+            return True
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.restype = ctypes.c_void_p
+        h = k32.OpenProcess(0x1000, False, pid & 0xFFFFFFFF)
+        if not h or h == ctypes.c_void_p(-1).value:
+            return False
+        try:
+            WAIT_TIMEOUT = 0x00000102
+            return k32.WaitForSingleObject(ctypes.c_void_p(h), 0) == WAIT_TIMEOUT
+        finally:
+            k32.CloseHandle(ctypes.c_void_p(h))
+    except Exception:
+        return True
+
+def _ppl_snapshot_pairs():
+    try:
+        import ctypes
+        from ctypes import wintypes as _wt
+        k32 = ctypes.windll.kernel32
+        k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+
+        class _PE32(ctypes.Structure):
+            _fields_ = [("dwSize", _wt.DWORD), ("cntUsage", _wt.DWORD),
+                        ("th32ProcessID", _wt.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                        ("th32ModuleID", _wt.DWORD), ("cntThreads", _wt.DWORD),
+                        ("th32ParentProcessID", _wt.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", _wt.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+        hs = k32.CreateToolhelp32Snapshot(0x2, 0)
+        if not hs or hs == ctypes.c_void_p(-1).value:
+            return []
+        pairs = []
+        try:
+            pe = _PE32()
+            pe.dwSize = ctypes.sizeof(_PE32)
+            ok = k32.Process32FirstW(hs, ctypes.byref(pe))
+            while ok:
+                pairs.append((int(pe.th32ProcessID), int(pe.th32ParentProcessID)))
+                ok = k32.Process32NextW(hs, ctypes.byref(pe))
+        finally:
+            k32.CloseHandle(hs)
+        return pairs
+    except Exception:
+        return []
+
+def _ppl_ready_pids():
+    """已就绪(完成初始化, PPL安全)的自家进程: 池Worker热身完成 + 文件监控ready。"""
+    out = []
+    try:
+        w = g_window
+        fm = getattr(w, '_file_monitor', None)
+        if fm and getattr(fm, '_fm_ready', False) and getattr(fm, '_proc', None):
+            out.append(int(fm._proc.pid))
+    except Exception:
+        pass
+    try:
+        for _w in getattr(_SCAN_WORKER_POOL, '_workers', []):
+            if getattr(_w, '_ready', False) and getattr(_w, '_proc', None):
+                out.append(int(_w._proc.pid))
+        sw = _SCAN_WORKER
+        if getattr(sw, '_ready', False) and getattr(sw, '_proc', None):
+            out.append(int(sw._proc.pid))
+    except Exception:
+        pass
+    seen = set()
+    uniq = []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+def _ppl_collect_targets():
+    """就绪进程本体 + 其真身子进程(bootloader的child), 去重。"""
+    targets = _ppl_ready_pids()
+    pairs = _ppl_snapshot_pairs()
+    kids_of = {}
+    for p, pp in pairs:
+        kids_of.setdefault(pp, []).append(p)
+    out = []
+    for t in targets:
+        if t not in out:
+            out.append(t)
+        for c in kids_of.get(t, []):
+            if c not in out:
+                out.append(c)
+    me = os.getpid()
+    if me not in out:
+        out.append(me)
+    return out
+
+def _ppl_children_of(pid):
+    pairs = _ppl_snapshot_pairs()
+    return [p for p, pp in pairs if pp == int(pid or 0)]
+
+def _ppl_guard_loop():
+    """一次性保护(前人实践: PPL引擎Worker, UI主进程保持常规独立进程):
+    等池预热完成 → 把已就绪的Worker及其真身各保护一次 → 结束, 不再有轮询/kvc调用。"""
+    if not os.path.exists(KVC_EXE):
+        _log("[PPL] kvc.exe 不存在, PPL守卫未启动: {}".format(KVC_EXE))
+        return
+    _g_pool_ready.wait(timeout=180)
+    time.sleep(3)
+    _n = 0
+    for pid in _ppl_collect_targets():
+        if pid == os.getpid():
+            continue
+        if _ppl_protect_pid(pid):
+            _n += 1
+    # 主进程UI最后封顶(此时全部Worker已创建完毕, 无后续创建需求)
+    _ppl_protect_pid(os.getpid())
+    time.sleep(2)
+    for pid in _ppl_collect_targets():
+        if pid != os.getpid() and _ppl_protect_pid(pid):
+            _n += 1
+    _log("[PPL] 一次性保护完成: {} 个进程已PPL-Antimalware(全部Worker+主进程UI)。".format(_n))
+    _g_ppl_capped[0] = True
+
+def _ppl_guard_start():
+    threading.Thread(target=_ppl_guard_loop, daemon=True, name='PPLGuard').start()
+
 logger = logging.getLogger('Engine')
 
 if getattr(sys, 'frozen', False):
@@ -1195,7 +2505,14 @@ def _engine_use_exe():
         _log("[扫描引擎] 未找到 SevenEngine.exe, 回退引擎代码模式: {}".format(SEVENGINE_EXE))
     return False
 
+def _engine_v3_available():
+    return os.path.exists(os.path.join(SEVENGINE_DIR, 'SevenEngine.py'))
+
 def _worker_cmd():
+    if _engine_v3_available():
+        if getattr(sys, 'frozen', False):
+            return [sys.executable, '--engine-worker']
+        return [sys.executable, os.path.abspath(__file__), '--engine-worker']
     if _engine_use_exe():
         return [SEVENGINE_EXE, "--WORKER"]
     if getattr(sys, 'frozen', False):
@@ -1214,14 +2531,30 @@ class _ResidentScanWorker:
     def __init__(self):
         self._proc = None
         self._req_lock = threading.RLock()
+        self._ready = False
 
     def _kill(self):
+        _p = self._proc
+        self._proc = None
+        if not _p:
+            return
+        # 先关stdin(丢弃缓冲, 防止GC时flush已死管道报 OSError Errno 22), 再杀进程, 最后收stdout
         try:
-            if self._proc:
-                self._proc.kill()
+            _p.stdin.close()
         except Exception:
             pass
-        self._proc = None
+        try:
+            _p.kill()
+        except Exception:
+            pass
+        try:
+            _p.stdout.close()
+        except Exception:
+            pass
+        try:
+            _p.wait(timeout=3)
+        except Exception:
+            pass
 
     def _ensure(self):
         with self._req_lock:
@@ -1229,15 +2562,18 @@ class _ResidentScanWorker:
                 return self._proc
             _env = dict(os.environ)
             _env['PYTHONIOENCODING'] = 'utf-8'
-            try:
-                self._proc = subprocess.Popen(
+            def _spawn():
+                _env2 = dict(_env)
+                _env2['SEVEN_MAIN_PID'] = str(os.getpid())
+                return subprocess.Popen(
                     _worker_cmd(),
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, bufsize=1, text=True,
-                    encoding='utf-8', errors='replace', cwd=BASE_DIR, env=_env
+                    encoding='utf-8', errors='replace', cwd=BASE_DIR, env=_env2
                 )
-            except Exception:
-                self._proc = None
+            _p = _ppl_spawn_retry(_spawn, 'ScanWorker')
+            self._proc = _p
+            if self._proc is None:
                 return None
             # 热身握手: 等引擎完成解压+模型加载(一次性成本)。
             # 否则首个扫描请求会撞上加载期, 超时->杀worker->再拉起->再加载, 恶性循环越跑越卡。
@@ -1262,6 +2598,13 @@ class _ResidentScanWorker:
                 _log("[扫描引擎] Worker 热身失败, 已放弃本次拉起")
                 return None
             _log("[扫描引擎] Worker 就绪 ({:.1f}s)".format(time.time() - _t0))
+            self._ready = True
+            try:
+                _ppl_protect_pid(self._proc.pid)
+                for _c in _ppl_children_of(self._proc.pid):
+                    _ppl_protect_pid(_c)
+            except Exception:
+                pass
             return self._proc
 
     def scan(self, filepath, quick=False, timeout=60):
@@ -1302,29 +2645,267 @@ class _ResidentScanWorker:
                 self._kill()
                 return None
 
+# 唯一常驻引擎Worker: 主防+后台+全盘扫描共用(实例见下方 _ScanWorkerFacade)
+
+# ===== Xdows Model 调用器(Xdows-Model-Caller.exe By Shiyi) 常驻 Worker =====
+_XDOWS_DIR = os.path.join(SEVENGINE_DIR, 'XdowsModel')
+_XDOWS_EXE = os.path.join(_XDOWS_DIR, 'Xdows-Model-Caller.exe')
+_XDOWS_MODE_FLAG = {'flash': '-f', 'standard': '-s', 'pro': '-p', 'adaptive': '-a'}
+_re_xdows_verdict = re.compile(r'模型返回：\s*(Malware|Suspicious|Clean)\s*\(([\d.]+)%\)', re.I)
+_re_xdows_error = re.compile(r'模型返回：\s*Error\s*\(([^)]*)\)', re.I)
+
+class _XdowsScanWorker:
+    """Xdows Model 常驻调用器(交互协议, GBK 编码):
+    启动横幅至'模型初始化完成' -> 每行一个文件路径 -> 响应'输入操作：扫描模式：X' +
+    '模型返回：Clean(11.26%)/Suspicious(x)/Malware(x)/Error(…)'。
+    返回 (res, conf, vt): CLEAN / MALICIOUS|Xdows[:Suspicious] / ERROR, 与 SevenEngine Worker 同构。"""
+    def __init__(self):
+        self._proc = None
+        self._req_lock = threading.RLock()
+        self._ready = False
+        self._lines = []
+
+    def _mode(self):
+        m = str(g_settings.get('scan_model', 'xdows-flash')).lower()
+        mode = m[len('xdows-'):] if m.startswith('xdows-') else 'flash'
+        return mode if mode in _XDOWS_MODE_FLAG else 'flash'
+
+    def _kill(self):
+        _p, self._proc, self._ready, self._lines = self._proc, None, False, []
+        if not _p:
+            return
+        try:
+            _p.stdin.close()
+        except Exception:
+            pass
+        try:
+            _p.kill()
+        except Exception:
+            pass
+        try:
+            _p.stdout.close()
+        except Exception:
+            pass
+        try:
+            _p.wait(timeout=3)
+        except Exception:
+            pass
+
+    def _ensure(self):
+        with self._req_lock:
+            if self._proc and self._proc.poll() is None:
+                return self._proc
+            self._lines = []
+            if not os.path.exists(_XDOWS_EXE):
+                _log("[Xdows] 调用器不存在: {}".format(_XDOWS_EXE))
+                return None
+            flag = _XDOWS_MODE_FLAG[self._mode()]
+            try:
+                self._proc = subprocess.Popen(
+                    [_XDOWS_EXE, flag], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, text=True, encoding='gbk', errors='replace',
+                    bufsize=1, cwd=_XDOWS_DIR,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except Exception as e:
+                _log("[Xdows] 启动失败: {}".format(e))
+                self._proc = None
+                return None
+            _done = threading.Event()
+
+            def _rd():
+                try:
+                    for _l in self._proc.stdout:
+                        _l = _l.rstrip()
+                        if _l:
+                            self._lines.append(_l)
+                        if '模型初始化完成' in _l:
+                            _done.set()
+                except Exception:
+                    pass
+                _done.set()
+
+            threading.Thread(target=_rd, daemon=True, name='XdowsBanner').start()
+            if not _done.wait(90) or self._proc.poll() is not None:
+                _log("[Xdows] 初始化超时/退出, 放弃本次拉起")
+                self._kill()
+                return None
+            self._ready = True
+            _log("[Xdows] Worker 就绪 ({} 模式)".format(self._mode()))
+            try:
+                _ppl_protect_pid(self._proc.pid)
+                for _c in _ppl_children_of(self._proc.pid):
+                    _ppl_protect_pid(_c)
+            except Exception:
+                pass
+            return self._proc
+
+    def scan(self, filepath, quick=False, timeout=60):
+        with self._req_lock:
+            proc = self._ensure()
+            if not proc:
+                return None
+            n0 = len(self._lines)
+            try:
+                proc.stdin.write(str(filepath) + '\n')
+                proc.stdin.flush()
+            except Exception:
+                self._kill()
+                return None
+            t0 = time.time()
+            verdict = None
+            while time.time() - t0 < timeout:
+                time.sleep(0.15)
+                for _l in self._lines[n0:]:
+                    m = _re_xdows_verdict.search(_l)
+                    if m:
+                        verdict = (m.group(1), float(m.group(2)))
+                        break
+                    if _re_xdows_error.search(_l):
+                        verdict = ('Error', 0.0)
+                        break
+                if verdict:
+                    break
+            if not verdict:
+                # 基础设施级故障(无响应/管道断裂): Worker状态不可信才重建
+                self._kill()
+                return None
+            v, score = verdict
+            conf = int(round(score))
+            vl = v.lower()
+            if vl == 'malware':
+                return ("MALICIOUS|Xdows", max(conf, 60), "Xdows")
+            if vl == 'suspicious':
+                # 三档判定中档: 高于推荐阈值 —— 按产品"宁拦勿漏"策略入恶意处置
+                return ("MALICIOUS|Xdows:Suspicious", max(conf, 60), "Xdows:Suspicious")
+            if vl == 'clean':
+                return ("CLEAN", conf, "Xdows")
+            # Error(文件级: 不支持类型/读取失败等): 该文件无法判定, 按留痕放行;
+            # Worker 健康常驻, 绝不因文件级结果重建(此前 Error 无百分比解析不到 ->
+            # 每次扫描都超时杀Worker, 30s重建循环卡死驱动隔离流程的根因)
+            _log("[Xdows] 文件无法判定(Error): {} -> 留痕放行".format(os.path.basename(str(filepath))))
+            return ("CLEAN", 0, "Xdows:Error")
+
+# ===== Tanka2-Agent (DEF项目 v1.1.0) 单发CLI Worker =====
+_TANKA2_DIR = os.path.join(SEVENGINE_DIR, 'Tanka2Model')
+_TANKA2_EXE = os.path.join(_TANKA2_DIR, 'Tanka2Agent.exe')
+
+class _Tanka2ScanWorker:
+    """Tanka2-Agent(DEF项目, lite_full_v2/2658 trees, 阈值0.82, 零误报白名单内置):
+    无常驻交互模式, 每次扫描单发进程 + --json (stdout 纯 JSON, 引擎加载实测 ~140ms)。
+    二值判定 Malware/Clean; 仅检测 PE(非PE/读取错误按 Clean, 与 SevenEngine V3 的 MZ 策略同域)。
+    返回 (res, conf, vt): CLEAN / MALICIOUS|Tanka2 / ERROR。"""
+    def __init__(self):
+        self._req_lock = threading.RLock()
+        self._ready = True      # 无常驻进程, 始终可用
+        self._proc = None
+
+    def _kill(self):
+        self._proc = None
+
+    def _ensure(self):
+        return True
+
+    def scan(self, filepath, quick=False, timeout=120):
+        with self._req_lock:
+            if not os.path.exists(_TANKA2_EXE):
+                _log("[Tanka2] 调用器不存在: {}".format(_TANKA2_EXE))
+                return ("ERROR", 0, "")
+            try:
+                proc = subprocess.run(
+                    [_TANKA2_EXE, str(filepath), '--json'],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    text=True, encoding='utf-8', errors='replace', timeout=timeout, cwd=_TANKA2_DIR,
+                    creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except Exception as e:
+                _log("[Tanka2] 调用失败 {}: {}".format(os.path.basename(filepath), e))
+                return ("ERROR", 0, "")
+            try:
+                rep = json.loads(proc.stdout or '{}')
+                r0 = (rep.get('results') or [None])[0]
+                if not r0:
+                    raise ValueError('no results')
+            except Exception as e:
+                _log("[Tanka2] JSON 解析失败 rc={} out={}".format(
+                    proc.returncode, (proc.stdout or '')[:120]))
+                return ("ERROR", 0, "")
+            try:
+                score = int(round(float(r0.get('score') or 0) * 100))
+            except Exception:
+                score = 0
+            verdict = (r0.get('verdict') or '').lower()
+            if verdict == 'malware':
+                return ("MALICIOUS|Tanka2", max(score, 60), "Tanka2")
+            return ("CLEAN", score, "Tanka2")
+
+class _ScanWorkerFacade:
+    """按 scan_model 设置在 Xdows / Tanka2 / SevenEngine Worker 间路由(同接口 facade)。
+    默认 xdows-flash; 切换设置时杀掉旧后端, 下次扫描自动拉起新后端。"""
+    def __init__(self):
+        self._xdows = _XdowsScanWorker()
+        self._tanka = _Tanka2ScanWorker()
+        self._seven = _ResidentScanWorker()
+        self._kind = None
+
+    def _active(self):
+        m = str(g_settings.get('scan_model', 'xdows-flash')).lower()
+        if m.startswith('xdows'):
+            kind = 'xdows'
+        elif m == 'tanka2':
+            kind = 'tanka2'
+        else:
+            kind = 'seven'
+        if kind != self._kind:
+            if self._kind is not None:
+                try:
+                    self._kill_kind(self._kind)
+                except Exception:
+                    pass
+            self._kind = kind
+        return {'xdows': self._xdows, 'tanka2': self._tanka, 'seven': self._seven}[kind]
+
+    def _kill_kind(self, kind):
+        try:
+            {'xdows': self._xdows, 'tanka2': self._tanka, 'seven': self._seven}[kind]._kill()
+        except Exception:
+            pass
+
+    @property
+    def _ready(self):
+        return bool(getattr(self._active(), '_ready', False))
+
+    @property
+    def _proc(self):
+        return getattr(self._active(), '_proc', None)
+
+    def _ensure(self):
+        return self._active()._ensure()
+
+    def _kill(self):
+        for w in (self._xdows, self._tanka, self._seven):
+            try:
+                w._kill()
+            except Exception:
+                pass
+
+    def scan(self, filepath, quick=False, timeout=60):
+        return self._active().scan(filepath, quick=quick, timeout=timeout)
+
+_SCAN_WORKER = _ScanWorkerFacade()      # 唯一常驻扫描Worker facade: 默认 Xdows Model(Flash), 可在控制台切换
+
+# 单Worker常驻: 引擎为Python实现, 每个Worker进程都要独立预热(解压+加载模型~1.5s)且各占进程/内存;
+# V3引擎18ms/文件, 单Worker串行吞吐足够(≈55文件/s), 全部扫描共用一个常驻Worker,
+# 进程数最少、预热成本最低。池接口保留(路由到同一Worker), 调用方无需改动。
 class _ScanWorkerPool:
-    """N个常驻引擎Worker并行(多开引擎进程, 各自持锁串行):
-    scan()优先取空闲Worker, 全忙则轮转排队。后台扫描(落盘/文件/MSI)走BG池,
-    与主防进程扫描专用通道(_SCAN_WORKER)互不抢占, 后台批量扫描不再拖住判决。"""
-    def __init__(self, n=3):
-        self._workers = [_ResidentScanWorker() for _ in range(n)]
+    """兼容接口: 内部只持有共享的单常驻Worker, scan直接路由过去(由Worker自带_req_lock串行)。"""
+    def __init__(self, workers):
+        self._workers = workers
         self._rr = 0
         self._rr_lock = threading.Lock()
 
     def scan(self, filepath, quick=False, timeout=60):
-        for _w in self._workers:
-            if _w._req_lock.acquire(blocking=False):
-                _w._req_lock.release()
-                return _w.scan(filepath, quick=quick, timeout=timeout)
-        with self._rr_lock:
-            _w = self._workers[self._rr]
-            self._rr = (self._rr + 1) % len(self._workers)
-        return _w.scan(filepath, quick=quick, timeout=timeout)
+        return self._workers[0].scan(filepath, quick=quick, timeout=timeout)
 
-_SCAN_WORKER = _ResidentScanWorker()    # FAST: 主防进程扫描专用通道
-# BG: 落盘/文件/MSI后台扫描并行池。修复Worker过少: 旧固定3个, 不随机器规格缩放;
-# 按CPU核数取 4~8(每个Worker是常驻引擎进程, 各自摊一份内存, 不宜无限开)。
-_SCAN_WORKER_POOL = _ScanWorkerPool(max(4, min(8, (os.cpu_count() or 4) // 2)))
+_SCAN_WORKER_POOL = _ScanWorkerPool([_SCAN_WORKER])
 
 class Whitelist:
     def __init__(self):
@@ -1550,7 +3131,7 @@ def is_system_path(file_path):
     if norm.find('/windows.old/') <= 4 and '/windows.old/' in norm:
         return True
     try:
-        _self_dir = os.path.dirname(os.path.abspath(__file__)).lower().replace('\\', '/')
+        _self_dir = BASE_DIR.lower().replace('\\', '/')
         if norm.startswith(_self_dir + '/') or norm == _self_dir:
             return True
     except:
@@ -2060,7 +3641,8 @@ class _StudyProxy:
         return out
 
 def _exe_scan_file(filepath):
-    """通过打包好的 SevenEngine.exe(CLI 模式)扫描单个文件, 返回 (res, conf, vt)。"""
+    """通过打包好的 SevenEngine.exe(CLI 模式)扫描单个文件, 返回 (res, conf, vt)。
+    兼容 V3(Return:ML:Gen.Malware / Score:99)与 V2(Result:/Confidence:/Info:)两种输出。"""
     try:
         _env = dict(os.environ)
         _env['PYTHONIOENCODING'] = 'utf-8'
@@ -2071,9 +3653,27 @@ def _exe_scan_file(filepath):
             timeout=120, env=_env, cwd=BASE_DIR,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         res, conf, vt = "CLEAN", 0, ""
+        seen_v3 = False
         for _ln in (proc.stdout or '').splitlines():
             _ln = _ln.strip()
-            if _ln.startswith('Result:'):
+            if _ln.startswith('Return:'):
+                seen_v3 = True
+                _r = _ln[len('Return:'):].strip()
+                if _r.upper().startswith('ML:'):
+                    _v = _r[3:].strip()
+                    if _v.lower() == 'clean':
+                        res = "CLEAN"
+                    else:
+                        res = "MALICIOUS|{}".format(_v)
+                        vt = "ML:{}".format(_v)
+                else:
+                    res = "ERROR"
+            elif _ln.startswith('Score:'):
+                try:
+                    conf = int(_ln[len('Score:'):].strip())
+                except ValueError:
+                    conf = 0
+            elif _ln.startswith('Result:'):
                 res = _ln[len('Result:'):].strip()
             elif _ln.startswith('Confidence:'):
                 try:
@@ -2082,6 +3682,10 @@ def _exe_scan_file(filepath):
                     conf = 0
             elif _ln.startswith('Info:'):
                 vt = _ln[len('Info:'):].strip()
+        if seen_v3:
+            if res.startswith("MALICIOUS") and conf <= 0:
+                conf = 60
+            return res, conf, vt
         if conf <= 0 and res.startswith('MALICIOUS'):
             try:
                 conf = int(res.rsplit('|', 1)[1])
@@ -2092,13 +3696,39 @@ def _exe_scan_file(filepath):
         _log("[扫描引擎] exe 调用失败: {}".format(e))
         return "ERROR", 0, ""
 
+class _V3EngineAdapter:
+    """SevenEngine V3(LightGBM 静态PE, MZ魔数, 阈值81)适配器:
+    对上保持 (res, conf, vt) 协议; 对下调 load_model()+scan_file(path, model)。"""
+    def __init__(self, mod):
+        self._m = mod
+        self._model = None
+        self._lock = threading.Lock()
+    def _get_model(self):
+        with self._lock:
+            if self._model is None:
+                self._model = self._m.load_model()
+            return self._model
+    def scan_file(self, filepath, depth=0):
+        try:
+            st, score = self._m.scan_file(filepath, self._get_model())
+        except Exception as e:
+            _log("[扫描引擎] V3 扫描异常 {}: {}".format(os.path.basename(filepath), e))
+            return "ERROR", 0, ""
+        if st == "malware":
+            return "MALICIOUS|Gen.Malware|ML", int(score or 0), "ML:Gen.Malware"
+        if st == "clean":
+            return "CLEAN", int(score or 0), ""
+        return "ERROR", 0, ""
+    def scan_file_quick(self, filepath):
+        return self.scan_file(filepath)
+
 class Scanner:
     """扫描门面:实际引擎为 SevenEngine\\SevenEngine.py(SevenEngine 目录)。
-    旧内置引擎(StudyEngine/Yara/AdvancedSignature/Onnx/Archive/Cloud)已移除,
     扫描结果格式保持 MALICIOUS|类型|来源|置信度 不变。
     支持两种调用方式(设置中切换):
       code - import SevenEngine 代码模式(默认)
-      exe  - 调用打包好的 SevenEngine.exe(worker 常驻协议 / CLI 单文件)"""
+      exe  - 调用打包好的 SevenEngine.exe(worker 常驻协议 / CLI 单文件)
+    V3 引擎(load_model+scan_file 接口)自动走 _V3EngineAdapter 适配。"""
     def __init__(self):
         self.whitelist = Whitelist()
         self._se = None
@@ -2124,9 +3754,14 @@ class Scanner:
                     if SEVENGINE_DIR not in sys.path:
                         sys.path.insert(0, SEVENGINE_DIR)
                     import SevenEngine as _se_mod
-                    self._se = _se_mod.Scanner()
-                    _lgbm_ok = getattr(getattr(self._se, 'lgbm', None), 'available', False)
-                    _log(">>> [扫描引擎] SevenEngine 已加载 (LightGBM: {})".format('正常' if _lgbm_ok else '未激活'))
+                    if hasattr(_se_mod, 'load_model') and hasattr(_se_mod, 'MALWARE_THRESHOLD'):
+                        self._se = _V3EngineAdapter(_se_mod)
+                        _log(">>> [扫描引擎] SevenEngine V3 已加载 (阈值{}, 低误报模型)".format(
+                            getattr(_se_mod, 'MALWARE_THRESHOLD', 81)))
+                    else:
+                        self._se = _se_mod.Scanner()
+                        _lgbm_ok = getattr(getattr(self._se, 'lgbm', None), 'available', False)
+                        _log(">>> [扫描引擎] SevenEngine 已加载 (LightGBM: {})".format('正常' if _lgbm_ok else '未激活'))
         return self._se
     def scan_file(self, filepath, depth=0):
         if self._use_exe():
@@ -2145,7 +3780,7 @@ class Scanner:
         return self._ensure().scan_file_quick(filepath)
     @property
     def study(self):
-        return _StudyProxy(self._ensure().study)
+        return _StudyProxy(getattr(self._ensure(), 'study', None))
 
 QUARANTINE_DIR = os.path.join(os.environ.get('APPDATA', 'C:\\Users\\Public\\AppData'), 'PASW', 'LockFile')
 WHITE_LIST_FILE = os.path.join(os.environ.get('APPDATA', 'C:\\Users\\Public\\AppData'), 'PASW', 'White', 'Write.txt')
@@ -2262,6 +3897,9 @@ g_settings = {
     "edr_protect": True,            # 行为EDR评分(进程落地文件+偏僻位置加分,≥70终止进程链)
     "dll_sideload_protect": True,   # DLL侧载/内存注入拦截(系统进程加载非系统未签名DLL)
     "etw_telemetry": True,          # 遥测拦截(端点规则):默认启动,轻量轮询采集+按Rules端点规则拦截(命中即拦)
+    "wsc_takeover": True,           # 安全中心接管: 全自动, 启动即向WSC注册本产品接管Defender(无UI开关)
+    "DefenseMode": False,           # DefenseMode: True时不做进程扫描/进程拦截(放行所有进程), 保留主动防御+文件防护(落盘/注册表等照常拦)
+    "scan_model": "tanka2",         # 扫描模型默认: tanka2|xdows-flash|xdows-standard|xdows-pro|xdows-adaptive|seven —— DefenseMode开关均使用
 }
 
 # ============================ 轻量行为EDR配置 ============================
@@ -3526,6 +5164,7 @@ class SettingsPage(ScrollPage):
         super().__init__(parent)
         th = get_theme()
         settings_list = [
+            ("DefenseMode", "DefenseMode", "开启后不进行进程扫描与进程拦截（放行所有进程），保留主动防御与文件防护：进程落盘文件、注册表等操作照常拦截，隔离功能不变", "shield"),
             ("high_sensitivity", "高灵敏模式", "降低检测阈值，提高检出率", "scan"),
             ("auto_handle", "自动处理", "自动隔离检测到的威胁", "shield"),
             ("enhanced_mode", "增强防护", "启用更多检测引擎", "cpu"),
@@ -3699,6 +5338,8 @@ class SettingsPage(ScrollPage):
         g_settings[key] = checked
         _save_settings_json()
         _log(f"[设置] {key}: {'开启' if checked else '关闭'}")
+        if key == 'autostart_enabled':
+            _apply_autostart(checked)
         if key in ("file_protect", "file_modify_monitor"):
             fm = getattr(self, '_file_monitor', None) or getattr(self.window(), '_file_monitor', None)
             if fm:
@@ -3740,6 +5381,8 @@ class SettingsPage(ScrollPage):
                         _log("[遥测拦截] 已关闭,Worker已停止")
                 except Exception:
                     pass
+        if key == "wsc_takeover":
+            _wsc_takeover(checked)
         try:
             def _do():
                 ApiClient.update_config(key, checked)
@@ -3790,7 +5433,7 @@ class _ManageDialog(QDialog):
         close_btn = QPushButton()
         close_btn.setFixedSize(28, 28)
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background: rgb(232,72,72,30); border-radius: 4px; }")
+        close_btn.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background: rgba(232,72,72,30); border-radius: 4px; }")
         close_btn.setIcon(QIcon(render_svg("close", th['text_secondary'], 16)))
         close_btn.clicked.connect(self.reject)
         hl.addWidget(close_btn)
@@ -3990,15 +5633,15 @@ class WhitelistDialog(_ManageDialog):
 
 class QuarantineDialog(_ManageDialog):
     def __init__(self, parent=None):
-        super().__init__("隔离区管理", parent)
-        restore_btn = self._make_btn("恢复选中", "accent")
+        super().__init__("Quarantine", parent)
+        restore_btn = self._make_btn("Restore Selected", "accent")
         restore_btn.clicked.connect(self._restore_selected)
         self._btn_bar.addWidget(restore_btn)
-        delete_btn = self._make_btn("永久删除", "danger")
+        delete_btn = self._make_btn("Delete Permanently", "danger")
         delete_btn.clicked.connect(self._delete_selected)
         self._btn_bar.addWidget(delete_btn)
         self._btn_bar.addStretch()
-        close_btn = self._make_outline_btn("关闭")
+        close_btn = self._make_outline_btn("Close")
         close_btn.clicked.connect(self.accept)
         self._btn_bar.addWidget(close_btn)
         self._load_entries()
@@ -4006,67 +5649,95 @@ class QuarantineDialog(_ManageDialog):
     def _load_entries(self):
         self._list_widget.clear()
         if not os.path.exists(QUARANTINE_DIR):
-            item = QListWidgetItem("（隔离区目录不存在）")
+            item = QListWidgetItem("(Quarantine directory not found)")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._list_widget.addItem(item)
             return
         items = []
-        for f in os.listdir(QUARANTINE_DIR):
-            fpath = os.path.join(QUARANTINE_DIR, f)
-            if os.path.isfile(fpath):
-                size = os.path.getsize(fpath)
-                mtime = os.path.getmtime(fpath)
-                import time as _t
-                date_str = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(mtime))
-                if size < 1024:
-                    size_str = f"{size} B"
-                elif size < 1024 * 1024:
-                    size_str = f"{size/1024:.1f} KB"
-                else:
-                    size_str = f"{size/1024/1024:.1f} MB"
-                orig_name = f.replace(".quarantine", "") if f.endswith(".quarantine") else f
-                display = f"{orig_name}    {size_str}    {date_str}"
-                items.append((display, fpath))
+        for qp, meta in _quar_entries():
+            try:
+                size = os.path.getsize(qp)
+                mtime = os.path.getmtime(qp)
+            except Exception:
+                continue
+            import time as _t
+            date_str = _t.strftime("%Y-%m-%d %H:%M", _t.localtime(mtime))
+            if size < 1024:
+                size_str = f"{size} B"
+            elif size < 1024 * 1024:
+                size_str = f"{size/1024:.1f} KB"
+            else:
+                size_str = f"{size/1024/1024:.1f} MB"
+            orig_name = os.path.basename(qp)
+            if orig_name.endswith(".quarantine"):
+                orig_name = orig_name[:-len(".quarantine")]
+            threat = (meta or {}).get('threat', '')
+            display = f"{orig_name}    {size_str}    {date_str}    {threat}"
+            items.append((display, qp, meta))
         if not items:
-            item = QListWidgetItem("（隔离区为空）")
+            item = QListWidgetItem("(Quarantine is empty)")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             self._list_widget.addItem(item)
             return
-        for display, fpath in items:
+        for display, fpath, meta in items:
             item = QListWidgetItem(display)
             item.setData(Qt.ItemDataRole.UserRole, fpath)
+            item.setData(Qt.ItemDataRole.UserRole + 1, meta or {})
             self._list_widget.addItem(item)
+
+    def _meta_path(self, fpath):
+        return fpath + ".meta.json"
 
     def _restore_selected(self):
         item = self._list_widget.currentItem()
         if not item:
             return
         fpath = item.data(Qt.ItemDataRole.UserRole)
+        meta = item.data(Qt.ItemDataRole.UserRole + 1) or {}
         if not fpath or not os.path.exists(fpath):
             return
         orig_name = os.path.basename(fpath)
         if orig_name.endswith(".quarantine"):
             orig_name = orig_name[:-len(".quarantine")]
-        dest_dir = QFileDialog.getExistingDirectory(self, "选择恢复目录")
-        if not dest_dir:
-            return
-        dest = os.path.join(dest_dir, orig_name)
-        if os.path.exists(dest):
-            reply = QMessageBox.question(self, "文件已存在", "目标文件已存在，是否覆盖？",
-                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply != QMessageBox.StandardButton.Yes:
+        meta_orig = (meta or {}).get('orig') or ''
+        if meta_orig and os.path.isdir(os.path.dirname(meta_orig)):
+            dest = meta_orig
+            if os.path.exists(dest):
+                reply = QMessageBox.question(self, "File Exists",
+                                             "A file already exists at the original location. Overwrite?\n" + dest,
+                                             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+                try:
+                    os.remove(dest)
+                except:
+                    pass
+        else:
+            dest_dir = QFileDialog.getExistingDirectory(self, "Select Restore Directory")
+            if not dest_dir:
                 return
-            try:
-                os.remove(dest)
-            except:
-                pass
+            dest = os.path.join(dest_dir, orig_name)
+            if os.path.exists(dest):
+                reply = QMessageBox.question(self, "File Exists", "Target file already exists. Overwrite?",
+                                              QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply != QMessageBox.StandardButton.Yes:
+                    return
+                try:
+                    os.remove(dest)
+                except:
+                    pass
         try:
             shutil.move(fpath, dest)
+            try:
+                if os.path.exists(self._meta_path(fpath)):
+                    os.remove(self._meta_path(fpath))
+            except Exception:
+                pass
             _log(f"[隔离区] 恢复: {fpath} -> {dest}")
             _scan_log(f"[已恢复] {orig_name}")
             self._load_entries()
         except Exception as e:
-            QMessageBox.warning(self, "恢复失败", str(e))
+            QMessageBox.warning(self, "Restore Failed", str(e))
 
     def _delete_selected(self):
         item = self._list_widget.currentItem()
@@ -4075,16 +5746,22 @@ class QuarantineDialog(_ManageDialog):
         fpath = item.data(Qt.ItemDataRole.UserRole)
         if not fpath or not os.path.exists(fpath):
             return
-        reply = QMessageBox.question(self, "永久删除", "确定永久删除此文件？此操作不可撤销！",
+        reply = QMessageBox.question(self, "Delete Permanently",
+                                      "Permanently delete this file? This cannot be undone!",
                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
         try:
             os.remove(fpath)
+            try:
+                if os.path.exists(self._meta_path(fpath)):
+                    os.remove(self._meta_path(fpath))
+            except Exception:
+                pass
             _log(f"[隔离区] 永久删除: {fpath}")
             self._load_entries()
         except Exception as e:
-            QMessageBox.warning(self, "删除失败", str(e))
+            QMessageBox.warning(self, "Delete Failed", str(e))
 
 
 class StartupDialog(_ManageDialog):
@@ -4348,32 +6025,139 @@ class ToolPage(ScrollPage):
         """)
 
 
+def _guard_alive(g):
+    if not g:
+        return False
+    try:
+        st = getattr(g, '_stop', None) or getattr(g, '_stop_flag', None)
+        if st is not None and st.is_set():
+            return False
+        for ta in ('_thread', '_thr'):
+            t = getattr(g, ta, None)
+            if t is not None:
+                return t.is_alive()
+        ts = getattr(g, '_threads', None)
+        if ts:
+            return any(t.is_alive() for t in ts)
+        return True
+    except Exception:
+        return False
+
+
 class AboutPage(ScrollPage):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._main = None
         th = get_theme()
-        info_card = CardWidget()
-        il = QVBoxLayout(info_card)
-        il.setContentsMargins(28, 24, 28, 24)
-        il.setSpacing(12)
-        about_title = QLabel("SevenEndPointSecurity")
-        about_title.setFont(QFont("Microsoft YaHei", 16, QFont.Weight.Bold))
-        about_title.setStyleSheet(f"background: transparent; color: rgb({th['accent'].red()},{th['accent'].green()},{th['accent'].blue()});")
-        il.addWidget(about_title)
-        about_text = QLabel(
-            "版本: v3.0.0\n"
-            "基于 PyQt6 的主动防御与反病毒软件\n"
-            "集成多引擎扫描、实时监控与云端协同\n\n"
-            "扫描引擎: SevenEngine (SevenEngine\\SevenEngine.py)\n"
-            "AI模型: LightGBM (EngineSET\\lightgbm.pda)\n\n"
-            "Copyright 2024-2026 NewEra Studio"
-        )
-        about_text.setFont(QFont("Microsoft YaHei", 10))
-        about_text.setWordWrap(True)
-        about_text.setStyleSheet(f"background: transparent; color: rgb({th['text_primary'].red()},{th['text_primary'].green()},{th['text_primary'].blue()});")
-        il.addWidget(about_text)
-        self.addWidget(info_card)
+        header = QWidget()
+        hl = QHBoxLayout(header)
+        hl.setContentsMargins(28, 18, 28, 18)
+        hl.setSpacing(16)
+        logo = QSvgWidget()
+        logo.setFixedSize(56, 56)
+        try:
+            _svg_p = os.path.join(BASE_DIR, 'Icon', 'SevenEndpoint.svg')
+            if os.path.exists(_svg_p):
+                logo.load(_svg_p)
+            else:
+                logo.load(QByteArray(render_svg("shield", th["accent"], 56).encode('utf-8')))
+        except Exception:
+            pass
+        hl.addWidget(logo)
+        head_txt = QVBoxLayout()
+        head_txt.setSpacing(2)
+        title = QLabel("SevenEndPointSecurity")
+        title.setFont(QFont("Microsoft YaHei", 20, QFont.Weight.Bold))
+        head_txt.addWidget(title)
+        ver = QLabel("SevenEndpointSecurity - EDR/Endpoint - NewEra Studio")
+        ver.setFont(QFont("Microsoft YaHei", 10))
+        head_txt.addWidget(ver)
+        hl.addLayout(head_txt)
+        hl.addStretch()
+        self.addWidget(header)
+
+        table_card = CardWidget()
+        tl = QVBoxLayout(table_card)
+        tl.setContentsMargins(24, 18, 24, 18)
+        tl.setSpacing(10)
+        self._tbl = QTableWidget(0, 2)
+        self._tbl.horizontalHeader().setVisible(False)
+        self._tbl.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self._tbl.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self._tbl.verticalHeader().setVisible(False)
+        self._tbl.verticalHeader().setDefaultSectionSize(34)
+        self._tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._tbl.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self._tbl.setShowGrid(False)
+        self._tbl.setAlternatingRowColors(True)
+        self._tbl.setStyleSheet(
+            "QTableWidget::item:hover { background: transparent; color: palette(text); }"
+            "QTableWidget::item:selected { background: transparent; color: palette(text); }"
+            "QTableWidget { selection-background-color: transparent; }")
+        tl.addWidget(self._tbl)
+        self.addWidget(table_card)
+        foot = QLabel("Copyright 2024-2026 NewEra Studio · Powered by Karlmayer")
+        foot.setFont(QFont("Microsoft YaHei", 9))
+        self.addWidget(foot)
         self.addStretch()
+        try:
+            self.refresh_status()
+        except Exception:
+            pass
+
+    def _win(self):
+        return self._main or self.window()
+
+    def refresh_status(self):
+        try:
+            w = self._win()
+            rm = getattr(w, '_realtime_monitor', None)
+            rt_ok = False
+            try:
+                rt_ok = bool(rm and rm._threads and any(t.is_alive() for t in rm._threads)
+                             and not rm._stop_flag.is_set())
+            except Exception:
+                rt_ok = False
+            em = getattr(w, '_etw_monitor', None)
+            tel_ok = False
+            try:
+                tel_ok = bool(em and em._threads and any(t.is_alive() for t in em._threads)
+                              and not em._stop_flag.is_set())
+            except Exception:
+                tel_ok = False
+            eng = g_status.get("ok")
+            rows = [("Realtime Protection", "Running" if rt_ok else "Not Running"),
+                    ("Behavior EDR", "Running" if _guard_alive(getattr(w, '_edr', None)) else "Disabled"),
+                    ("Drop Scan", "Running" if _guard_alive(getattr(w, '_file_monitor', None)) else "Disabled"),
+                    ("Telemetry", "Running" if tel_ok else "Disabled"),
+                    ("Memory Guard", "Running" if _guard_alive(getattr(w, '_memory_guard', None)) else "Disabled"),
+                    ("MBR Guard", "Running" if _guard_alive(getattr(w, '_mbr_guard', None)) else "Disabled"),
+                    ("Scan Engine", "Running" if eng else "Not Ready"),
+                    ("Scan Model", str(g_settings.get("scan_model", "xdows-flash")).replace("xdows-", "Xdows ").title()),
+                    ("Xdows Model", "Xdows Model 调用器 By Shiyi"),
+                    ("Tanka2 Model", "Tanka2-Agent v1.1.0 · DEF Project"),
+                    ("Security Center", "Registered" if g_settings.get("wsc_takeover", False) else "Default"),
+                    ("Quarantined Files", str(len(_quar_entries())))]
+            t = self._tbl
+            t.setRowCount(len(rows))
+            for i, (k, v) in enumerate(rows):
+                t.setItem(i, 0, QTableWidgetItem(k))
+                vi = QTableWidgetItem(str(v))
+                vi.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                t.setItem(i, 1, vi)
+            t.setFixedHeight(34 * len(rows) + 8)
+        except Exception:
+            pass
+
+    def showEvent(self, event):
+        try:
+            self.refresh_status()
+        except Exception:
+            pass
+        try:
+            super().showEvent(event)
+        except Exception:
+            pass
 
     def update_theme(self):
         super().update_theme()
@@ -4381,8 +6165,6 @@ class AboutPage(ScrollPage):
         for label in self.findChildren(QLabel):
             if label.text() == "SevenEndPointSecurity":
                 label.setStyleSheet(f"background: transparent; color: rgb({th['accent'].red()},{th['accent'].green()},{th['accent'].blue()});")
-            elif label.text().startswith("版本"):
-                label.setStyleSheet(f"background: transparent; color: rgb({th['text_primary'].red()},{th['text_primary'].green()},{th['text_primary'].blue()});")
 
 
 class AnimatedStackedWidget(QStackedWidget):
@@ -4472,6 +6254,7 @@ class FileMonitor:
         self._stop_flag = threading.Event()
         self._reader_thread = None
         self._trusted_dirs = set()
+        self._fm_ready = False
         self._dialog_active = False
         self._rollback_event = threading.Event()
         self._rollback_count = 0
@@ -4482,16 +6265,18 @@ class FileMonitor:
         self._stop_flag.clear()
         _env = dict(os.environ)
         _env['PYTHONIOENCODING'] = 'utf-8'
-        try:
-            self._proc = subprocess.Popen(
+        def _spawn_fm():
+            _env2 = dict(_env)
+            _env2['SEVEN_MAIN_PID'] = str(os.getpid())
+            return subprocess.Popen(
                 _file_monitor_cmd(),
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, bufsize=1, text=True,
-                encoding='utf-8', errors='replace', cwd=BASE_DIR, env=_env
+                encoding='utf-8', errors='replace', cwd=BASE_DIR, env=_env2
             )
-        except Exception as e:
-            _log("[文件监控] 启动子进程失败: {}".format(e))
-            self._proc = None
+        self._proc = _ppl_spawn_retry(_spawn_fm, 'FileMonitor')
+        if self._proc is None:
+            _log("[文件监控] 启动子进程失败(含PPL重试)")
             return
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
@@ -4534,6 +6319,14 @@ class FileMonitor:
                 break
             line = line.strip()
             if line:
+                if '[file-monitor] ready' in line and not self._fm_ready:
+                    self._fm_ready = True
+                    try:
+                        _ppl_protect_pid(self._proc.pid)
+                        for _c in _ppl_children_of(self._proc.pid):
+                            _ppl_protect_pid(_c)
+                    except Exception:
+                        pass
                 _log("[文件监控子进程] {}".format(line))
 
     def _send_command(self, cmd_dict):
@@ -4597,30 +6390,42 @@ class FileMonitor:
                             _log("[落盘扫描] 文件监控转交: {}".format(_dp))
                     except Exception:
                         pass
-            elif msg.get("type") == "black_dll":
-                # 黑DLL(白加黑侧载名单)新落盘: 定位到宿主则终止整链, 并删除DLL
+            elif msg.get("type") == "dll_drop":
+                # 白加黑行为判定(非名单): 落盘DLL与System32/SysWOW64同名系统DLL重复
+                # -> 侧载副本, 隔离(可还原)+拦截记录; 普通DLL -> 引擎扫描队列
                 _bp = msg.get("path", "")
-                _bpid = msg.get("proc_pid", 0)
-                _bname = msg.get("proc_name", "")
-                _bpath = msg.get("proc_path", "")
-                try:
-                    _log("[拦截-DLL] 黑DLL侧载落盘: {} 宿主:{}({})".format(_bp, _bname or '?', _bpid))
-                    _record_interception('黑DLL侧载', os.path.basename(_bp), _bp,
-                                         threat_type='Sideload DLL', confidence=90,
-                                         action='blocked', extra='宿主:{}({})'.format(_bname, _bpid))
-                    _edr_add_event(_bpid, _bname or 'Unknown.exe', _bpath or '', 'dll_drop', 15,
-                                   'Black DLL dropped (sideload): {}'.format(_bp))
+                if not _bp:
+                    pass
+                elif _is_system_dll_replica(_bp):
                     try:
-                        os.remove(_bp)
+                        _bparent = _find_parent_process(_bp)
+                        _bpid, _bname, _bpath = (_bparent[0], _bparent[1], _bparent[2]) if _bparent else (0, '', '')
+                        _log("[拦截-DLL] 系统DLL侧载副本: {} 宿主:{}({})".format(_bp, _bname or '?', _bpid))
+                        _record_interception('敏感操作(系统DLL侧载副本)', os.path.basename(_bp), _bp,
+                                             threat_type='System DLL Sideload Replica', confidence=90,
+                                             engine='行为判定', action='blocked',
+                                             extra='与System32/SysWOW64同名DLL重复; 宿主:{}({})'.format(_bname, _bpid))
+                        _edr_add_event(_bpid, _bname or 'Unknown.exe', _bpath or '', 'dll_drop', 15,
+                                       'System DLL replica dropped (sideload staging): {}'.format(_bp))
+                        _qdest = _quarantine_file(_bp, 'System DLL Sideload Replica')
+                        if _qdest:
+                            _log(f"[拦截-DLL] 侧载副本已隔离: {_bp}")
+                            _notify("Threat Quarantined", "Threat Quarantined {}".format(os.path.basename(_bp)),
+                                    pid=_bpid, name=_bname or os.path.basename(_bp), path=_bp)
+                        else:
+                            try:
+                                os.remove(_bp)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
-                    _notify("Threat Block", "Threat Block {}".format(_bname or os.path.basename(_bp)))
-                    _rm2 = getattr(self._parent, '_realtime_monitor', None)
-                    if _rm2 is not None and _bpid:
-                        threading.Thread(target=_rm2._chain_kill_and_rollback,
-                                         args=(_bpid, _bname, _bpath), daemon=True).start()
-                except Exception as e:
-                    _log("[拦截-DLL] 处理异常: {}".format(e))
+                else:
+                    try:
+                        _rm = getattr(self._parent, '_realtime_monitor', None)
+                        if _rm is not None and hasattr(_rm, '_drop_scan_queue'):
+                            _rm._drop_scan_queue.put(_bp)
+                    except Exception:
+                        pass
 
     def _show_dialog(self, count, creates, deletes, modifies, renames, files, ops, proc_name, proc_pid, proc_path, ransomware=False, score_only=False):
         """托盘模式: 文件操作达阈值(60) -> 行为规则判定 -> 豁免放行 或 自动回滚+终止整链+Ransom Block(无需确认)。
@@ -4635,14 +6440,14 @@ class FileMonitor:
         try:
             if score_only:
                 # 行为规则放行(子进程已判定): 源码/文本/配置类批量改写、纯创建为主等
-                # 正常软件批量写盘(TraeCode等IDE/构建/解压/同步) —— 仅计分。
-                _log("[文件防护] 批量文件操作({}次)未命中勒索突发特征, 仅计分: {} 建{}删{}改{}名{}".format(
+                # 正常软件批量写盘(TraeCode等IDE/构建/解压/同步) —— 留痕不计分。
+                # 自家进程链(主程序/引擎Worker)的自身I/O不告警不留痕, 防日志刷屏。
+                if _is_own_chain_pid(proc_pid):
+                    return
+                _log("[文件防护] 批量文件操作({}次)未命中勒索突发特征, 放行: {} 建{}删{}改{}名{}".format(
                     count, proc_name or '未知', creates, deletes, modifies, renames))
-                _record_behavior(proc_pid, proc_name or '未知', proc_path or '', 0, '批量文件操作(计分)',
+                _record_behavior(proc_pid, proc_name or '未知', proc_path or '', 0, '批量文件操作(放行)',
                                  f'创建:{creates} 删除:{deletes} 修改:{modifies} 重命名:{renames}')
-                _edr_add_event(proc_pid, proc_name or 'Unknown.exe', proc_path or '', 'ransom_op', 10,
-                               'Mass file ops x{} (behavior-release): create={} delete={} modify={} rename={}'.format(
-                                   count, creates, deletes, modifies, renames))
                 return
             _pp = (proc_path or '')
             _pp_sys = bool(_pp) and is_system_path(_pp)
@@ -4667,9 +6472,7 @@ class FileMonitor:
                     if any(t in _p for t in _DOC_DIR_TOKENS):
                         _doc_del = True
             if not _pp_sys and _pure_del and not _ext_renames and not proc_pid:
-                _log("[文件防护] 未归因纯删除{}次(用户清理行为), 放行仅计分".format(count))
-                _edr_add_event(proc_pid, proc_name or 'Unknown.exe', _pp, 'ransom_op', 10,
-                               'Unattributed mass delete x{} (user-cleanup grace)'.format(count))
+                _log("[文件防护] 未归因纯删除{}次(用户清理行为), 放行".format(count))
                 self._send_command({"cmd": "resume"})
                 return
             if _pp_sys or not (_ext_renames >= 8 or (proc_pid and _doc_del)):
@@ -4686,7 +6489,8 @@ class FileMonitor:
             _record_interception('文件防护(勒索)', proc_name or 'Unknown.exe', proc_path or '',
                                  threat_type='Ransomware', action='blocked',
                                  extra='PID:{} 操作{}次(创建{} 删除{} 修改{} 重命名{})'.format(proc_pid, count, creates, deletes, modifies, renames))
-            _notify("Ransom Block", "Ransom Block {}".format(proc_name or 'Unknown.exe'))
+            _notify("Ransomware Blocked", "Ransomware Blocked {}".format(proc_name or 'Unknown.exe'),
+                    pid=proc_pid, name=proc_name or 'Unknown.exe', path=proc_path)
             # 自动回滚全部操作 + 终止整条进程链
             threading.Thread(target=self._do_rollback_and_terminate,
                              args=(ops, files, proc_name, proc_pid, proc_path, True),
@@ -4857,6 +6661,7 @@ class LightTelemetryMonitor:
         self._hb = time.time()
         self._self_pid = os.getpid()
         self._white_rules, self._match_rules = [], []
+        self._hosts_last = None   # hosts 完整性基线
         self._create_seen = {}   # processcreate按pid去重(60s): 快速回调与2s轮询双通道不重复计分
 
     # ---------------- 规则引擎(与 Rules/*.json 端点规则同构) ----------------
@@ -5009,7 +6814,7 @@ class LightTelemetryMonitor:
                 t = threading.Thread(target=fn, daemon=True, name=name)
                 t.start()
                 self._threads.append(t)
-            _log("[遥测拦截] 轻量遥测已启动(进程2s/网络3s/注册表15s轮询, 无ETW内核会话, 近零CPU)")
+            _log("[遥测拦截] 轻量遥测已启动(进程2s/网络3s/注册表9s轮询, 无ETW内核会话, 近零CPU)")
             _etw_log("START light telemetry poll mode (ETW session removed); rules white={} match={}".format(
                 len(self._white_rules), len(self._match_rules)))
 
@@ -5254,6 +7059,11 @@ class LightTelemetryMonitor:
         ('HKLM', r'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon', 'values'),
         ('HKLM', r'SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options', 'subkeys'),
         ('HKLM', r'SYSTEM\CurrentControlSet\Services', 'subkeys_imagepath'),
+        # 防规避: Defender 排除项写入(银狐 TTP) —— 新增/篡改即回滚
+        ('HKLM', r'SOFTWARE\Microsoft\Windows Defender\Exclusions\Paths', 'values'),
+        ('HKLM', r'SOFTWARE\Microsoft\Windows Defender\Exclusions\Processes', 'values'),
+        # 持久化: TypeLib 劫持(HKCU {GUID}\1.0\0\win64 默认值) —— 新增/篡改即回滚
+        ('HKCU', r'SOFTWARE\Classes\TypeLib', 'typelib'),
     )
 
     def _reg_snapshot(self):
@@ -5267,7 +7077,31 @@ class LightTelemetryMonitor:
             except Exception:
                 continue
             try:
-                if mode == 'values':
+                if mode == 'typelib':
+                    # 深度快照: {GUID} -> '1.0' -> '0' -> 'win64' 默认值(劫持写入点)
+                    i = 0
+                    while True:
+                        try:
+                            guid = winreg.EnumKey(k, i)
+                        except OSError:
+                            break
+                        v = ''
+                        try:
+                            k2 = winreg.OpenKey(k, guid, 0, winreg.KEY_READ | 0x0200)
+                            try:
+                                ver = winreg.EnumKey(k2, 0)
+                                k3 = winreg.OpenKey(k2, ver + r'\0\win64', 0, winreg.KEY_READ | 0x0200)
+                                try:
+                                    v = str(winreg.QueryValueEx(k3, '')[0])[:200]
+                                finally:
+                                    winreg.CloseKey(k3)
+                            finally:
+                                winreg.CloseKey(k2)
+                        except Exception:
+                            pass
+                        snap['{}\\{}'.format(base, guid)] = v
+                        i += 1
+                elif mode == 'values':
                     i = 0
                     while True:
                         try:
@@ -5299,24 +7133,295 @@ class LightTelemetryMonitor:
                 winreg.CloseKey(k)
         return snap
 
+    # ---- 基线持久化: 修复"重启时篡改已存在 -> 进入基线 -> 永不回滚"(基线污染) ----
+    # 注册表快照/hosts 基线存盘, 重启后沿用上次干净基线; 篡改跨重启也会被识别为 diff 并回滚。
+    # TypeLib 条目不持久化(软件安装会新增合法 GUID, 旧基线会误删) —— 每次启动重新快照。
+    _BASELINE_PATH = os.path.join(BASE_DIR, 'baseline.json')
+    _BASELINE_MAX_AGE = 30 * 24 * 3600   # 基线超 30 天视为失效(避免陈旧基线大面积误报)
+
+    def _baseline_load(self):
+        try:
+            if os.path.exists(self._BASELINE_PATH):
+                # 旧版 hosts 全文入库可产生 GB 级基线(实测 905MB -> 内存 3.66GB): 拒载并删除
+                if os.path.getsize(self._BASELINE_PATH) > 50 * 1024 * 1024:
+                    try:
+                        os.remove(self._BASELINE_PATH)
+                    except OSError:
+                        pass
+                    return None, None
+                with open(self._BASELINE_PATH, 'r', encoding='utf-8') as f:
+                    d = json.load(f)
+                if isinstance(d, dict) and time.time() - d.get('ts', 0) <= self._BASELINE_MAX_AGE:
+                    reg = d.get('reg') if isinstance(d.get('reg'), dict) else {}
+                    hosts_real = d.get('hosts_real')
+                    if not isinstance(hosts_real, list):
+                        legacy = d.get('hosts')     # 旧格式 hosts 全文 -> 提取真实条目行集
+                        if isinstance(legacy, str):
+                            hosts_real = [l.strip() for l in legacy.splitlines()
+                                          if l.strip() and not l.strip().startswith('#')]
+                        else:
+                            hosts_real = []
+                    return reg, hosts_real
+        except Exception:
+            pass
+        return None, None
+
+    def _baseline_save(self, reg, hosts_real):
+        """基线持久化: 只存注册表快照 + hosts 真实条目行集(不含全文/注释/空行)。
+        内容未变则不重写(旧版每~45s全量重写, hosts 膨胀后为 GB 级磁盘 Burn)。"""
+        try:
+            persist = {k: v for k, v in reg.items() if '\\Classes\\TypeLib\\' not in k}
+            hosts_list = list(hosts_real or [])
+            core = json.dumps({'reg': persist, 'hosts_real': hosts_list},
+                              ensure_ascii=False, sort_keys=True)
+            try:
+                with open(self._BASELINE_PATH, 'r', encoding='utf-8') as f:
+                    d = json.load(f)
+                old_core = json.dumps({'reg': {k: v for k, v in (d.get('reg') or {}).items()
+                                               if '\\Classes\\TypeLib\\' not in k},
+                                       'hosts_real': d.get('hosts_real') or []},
+                                      ensure_ascii=False, sort_keys=True)
+            except Exception:
+                old_core = None
+            if old_core == core:
+                return
+            with open(self._BASELINE_PATH, 'w', encoding='utf-8') as f:
+                json.dump({'ts': time.time(), 'reg': persist, 'hosts_real': hosts_list},
+                          f, ensure_ascii=False)
+        except Exception:
+            pass
+
     def _reg_loop(self):
         time.sleep(5)
-        prev = self._reg_snapshot()
-        while not self._stop_flag.wait(15.0):
+        saved_reg, saved_hosts = self._baseline_load()
+        if saved_hosts is not None and self._hosts_last is None:
+            self._hosts_last = saved_hosts   # 上次干净 hosts 真实条目行集(不含注释/空行) -> 启动前已存在的篡改行会被判为新增并回滚
+        fresh = self._reg_snapshot()
+        prev = dict(saved_reg) if saved_reg else {}
+        for k, v in fresh.items():
+            if '\\Classes\\TypeLib\\' in k or k not in prev:
+                prev[k] = v   # TypeLib 每次启动重新快照; 其余键以持久化基线为准
+        _n_save = 0
+        while not self._stop_flag.wait(9.0):
             try:
                 cur = self._reg_snapshot()
                 for k, v in cur.items():
                     if k not in prev:
+                        if self._reg_tamper_block(k, None, v):
+                            continue
                         self._dispatch('registryset', 0, 0, k, '', '新增: {} = {}'.format(k, v))
                     elif prev[k] != v:
+                        if self._reg_tamper_block(k, prev[k], v):
+                            continue
                         self._dispatch('registryset', 0, 0, k, '',
                                        '修改: {} = {} (原:{})'.format(k, v, prev[k][:80]))
                 for k in prev:
                     if k not in cur:
                         self._dispatch('registrydelete', 0, 0, k, '', '删除: {}'.format(k))
                 prev = cur
+                self._hosts_check()
+                _n_save += 1
+                if _n_save % 5 == 1:   # ~45s 存一次干净基线(回滚成功后的状态)
+                    self._baseline_save(prev, self._hosts_last)
             except Exception:
                 continue
+
+    # ---- 注册表篡改主动回滚(轮询无写入者PID, 无法杀链 -> 直接还原键值 + 告警) ----
+    _REG_REVERT_BAD_DATA = ('cmd.exe', 'powershell', 'wscript', 'cscript', 'mshta', 'rundll32',
+                            'regsvr32', '\\users\\public\\', '\\temp\\', '\\tmp\\',
+                            '.ps1', '.vbs', '.vbe', '.js', '.jse', '.bat', '.cmd', '.lnk')
+    _REG_REVERT_GOOD_DATA = ('program files', '\\windows\\')
+
+    def _reg_tamper_block(self, k, old_v, new_v):
+        """持久化/防规避键篡改 -> 还原 + Threat Blocked 告警。返回 True=已处置。
+        误报控制: 数据指向 Program Files/Windows 的合法自启不回滚。"""
+        try:
+            if not k:
+                return False
+            kl = k.lower()
+            vl = str(new_v or '').lower()
+            parts = k.split('\\')
+            hive, leaf = parts[0], parts[-1]
+            if hive not in ('HKLM', 'HKCU'):
+                return False
+            # Defender 排除项: 新增/修改一律回滚(删除该排除值)
+            if 'windows defender\\exclusions' in kl:
+                if self._reg_write_back(hive, '\\'.join(parts[1:-1]), leaf, None):
+                    self._reg_report(k, 'Defender exclusion removed', old_v, new_v)
+                    return True
+                return False
+            # TypeLib 劫持(HKCU): 新增 {GUID} -> 整树删除; 已存在但 win64 默认值被改 -> 恢复
+            if '\\typelib' in kl and hive == 'HKCU':
+                sub = '\\'.join(parts[1:])
+                if old_v is None:
+                    if self._reg_delete_tree(hive, sub):
+                        self._reg_report(k, 'TypeLib hijack key removed', None, new_v)
+                        return True
+                elif str(new_v or '').strip() and old_v != new_v:
+                    if self._reg_write_back(hive, sub + r'\1.0\0\win64', '', old_v):
+                        self._reg_report(k, 'TypeLib hijack value restored', old_v, new_v)
+                        return True
+                return False
+            bad = any(m in vl for m in self._REG_REVERT_BAD_DATA)
+            good = any(m in vl for m in self._REG_REVERT_GOOD_DATA)
+            # IFEO Debugger 劫持: 新增子键且带 Debugger 值
+            if 'image file execution options' in kl and old_v is None and new_v:
+                if self._reg_write_back(hive, '\\'.join(parts[1:-1]), leaf, None):
+                    self._reg_report(k, 'IFEO Debugger removed', None, new_v)
+                    return True
+                return False
+            # 持久化键(Run/RunOnce/Winlogon/Load): 数据含解释器/脚本/可疑路径 -> 还原
+            is_persist = ('\\currentversion\\run' in kl or '\\currentversion\\runonce' in kl
+                          or '\\windows\\load' in kl or '\\winlogon\\' in kl)
+            if is_persist and bad and not good:
+                data = old_v if old_v is not None else None  # 新增->删除值; 篡改->还原旧值
+                if self._reg_write_back(hive, '\\'.join(parts[1:-1]), leaf, data):
+                    self._reg_report(k, 'persistence reverted', old_v, new_v)
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _reg_write_back(self, hive_name, subpath, value_name, data):
+        """data=None 删除值; 否则写回旧值。"""
+        try:
+            import winreg
+            hive = {'HKLM': winreg.HKEY_LOCAL_MACHINE, 'HKCU': winreg.HKEY_CURRENT_USER}[hive_name]
+            if data is None:
+                pk = winreg.OpenKey(hive, subpath, 0, winreg.KEY_SET_VALUE | 0x0200)
+                winreg.DeleteValue(pk, value_name)
+                winreg.CloseKey(pk)
+            else:
+                k = winreg.CreateKeyEx(hive, subpath, 0, winreg.KEY_SET_VALUE | 0x0200)
+                winreg.SetValueEx(k, value_name, 0, winreg.REG_SZ, data)
+                winreg.CloseKey(k)
+            return True
+        except Exception:
+            return False
+
+    def _reg_delete_tree(self, hive_name, subpath):
+        try:
+            import winreg, ctypes
+            hive = {'HKLM': winreg.HKEY_LOCAL_MACHINE, 'HKCU': winreg.HKEY_CURRENT_USER}.get(hive_name)
+            if hive is None:
+                return False
+            return ctypes.windll.advapi32.RegDeleteTreeW(hive, subpath) == 0
+        except Exception:
+            return False
+
+    def _reg_report(self, k, action_desc, old_v, new_v):
+        try:
+            leaf = k.split('\\')[-1] if k else 'Registry'
+            _log("[主防-注册表] 已回滚: {} ({})".format(k, action_desc))
+            _etw_log("REG-REVERT [{}] {} old={} new={}".format(action_desc, k, str(old_v)[:80], str(new_v)[:80]))
+            _record_interception('主防-注册表回滚', leaf, k, threat_type='registry_persistence',
+                                 confidence=85, engine='主防轮询', action='terminated',
+                                 extra='{} old={} new={}'.format(action_desc, str(old_v)[:60], str(new_v)[:60]))
+            _notify("Threat Blocked", "Threat Blocked Registry Tamper: {}".format(leaf))
+        except Exception:
+            pass
+
+    # ---- hosts 完整性监测(篡改即回滚新增行 + 告警) ----
+    _HOSTS_PATH = os.path.join(os.environ.get('SystemRoot', r'C:\Windows'),
+                               'System32', 'drivers', 'etc', 'hosts')
+
+    def _hosts_check(self):
+        # 膨胀闸门: hosts 被空行填充到 MB 级(失控/中毒) -> 自修复(旧版全量读入并入库 baseline.json, 内存/磁盘双爆)
+        try:
+            sz = os.path.getsize(self._HOSTS_PATH)
+        except OSError:
+            return
+        if sz > 1024 * 1024:
+            self._hosts_repair_bloat(sz)
+            return
+        try:
+            with open(self._HOSTS_PATH, 'r', encoding='utf-8', errors='ignore') as f:
+                cur = f.read()
+        except Exception:
+            return
+        try:
+            # 只对"真实条目"(非空非注释)做篡改判定: 注释/空行不入基线, 防膨胀回环与注释误报
+            cur_real = [l.strip() for l in cur.splitlines()
+                        if l.strip() and not l.strip().startswith('#')]
+            if len(cur_real) > len(set(cur_real)):
+                # 重复条目压缩(测试套件每次运行追加同名条目所致): 仅去重, 零数据丢失
+                uniq = list(dict.fromkeys(cur_real))
+                try:
+                    with open(self._HOSTS_PATH, 'w', encoding='utf-8', errors='ignore') as f:
+                        f.write('\r\n'.join(uniq) + ('\r\n' if uniq else ''))
+                    _log("[主防-hosts] 去重压缩: {} -> {} 条真实条目".format(len(cur_real), len(uniq)))
+                except OSError:
+                    pass
+                cur_real = uniq
+            if self._hosts_last is None:
+                self._hosts_last = cur_real
+                return
+            prev_set = set(self._hosts_last)
+            cur_set = set(cur_real)
+            added = [l for l in cur_real if l not in prev_set]
+            removed = [l for l in self._hosts_last if l not in cur_set]
+            if added:
+                # 回滚: 移除新增行(=篡改的解析记录), 其余行(含注释/空行)原样保留
+                try:
+                    added_set = set(added)
+                    keep = [l for l in cur.splitlines() if l.strip() not in added_set]
+                    with open(self._HOSTS_PATH, 'w', encoding='utf-8', errors='ignore') as f:
+                        f.write('\r\n'.join(keep) + ('\r\n' if keep else ''))
+                    _log("[主防-hosts] 检测到篡改并已回滚 {} 行: {}".format(len(added), ' | '.join(a[:60] for a in added)))
+                    _etw_log("HOSTS-REVERT added={}".format(' || '.join(a[:60] for a in added)))
+                    _record_interception('主防-hosts回滚', 'hosts', self._HOSTS_PATH,
+                                         threat_type='hosts_tamper', confidence=90,
+                                         engine='主防轮询', action='terminated',
+                                         extra='; '.join(a[:80] for a in added)[:200])
+                    _notify("Threat Blocked", "Threat Blocked Hosts Tamper ({} lines reverted)".format(len(added)))
+                except Exception as e:
+                    _log("[主防-hosts] 回滚失败: {}".format(e))
+            elif removed:
+                _log("[主防-hosts] 检测到删除 {} 行(留痕不回滚): {}".format(len(removed), ' | '.join(r[:50] for r in removed)))
+            # 以磁盘当前真实条目重建基线(回滚成功后不会重复告警)
+            self._hosts_last = cur_real
+        except Exception:
+            pass
+
+    def _hosts_repair_bloat(self, sz):
+        """hosts 膨胀自修复: 流式提取真实条目(空行/注释丢弃), 回写紧凑 hosts。
+        所有真实条目全部保留(零数据丢失); 若存在基线外未知条目, 追加告警但仍然修复膨胀。"""
+        real = []
+        buf = b''
+        try:
+            with open(self._HOSTS_PATH, 'rb') as f:
+                while True:
+                    chunk = f.read(8 << 20)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    parts = buf.split(b'\n')
+                    buf = parts.pop()
+                    for ln in parts:
+                        s = ln.strip()
+                        if s and not s.startswith(b'#'):
+                            real.append(s.decode('utf-8', 'ignore').strip())
+            if buf.strip() and not buf.strip().startswith(b'#'):
+                real.append(buf.decode('utf-8', 'ignore').strip())
+        except Exception:
+            return
+        try:
+            real = list(dict.fromkeys(real))    # 去重压缩(零数据丢失)
+            with open(self._HOSTS_PATH, 'w', encoding='utf-8', errors='ignore') as f:
+                f.write('\r\n'.join(real) + ('\r\n' if real else ''))
+            self._hosts_last = real
+            new_sz = os.path.getsize(self._HOSTS_PATH)
+            _log("[主防-hosts] hosts 膨胀自修复: {} -> {} bytes, 保留 {} 条真实条目".format(sz, new_sz, len(real)))
+            _record_interception('主防-hosts回滚', 'hosts', self._HOSTS_PATH,
+                                 threat_type='hosts_bloat', confidence=95,
+                                 engine='主防轮询', action='terminated',
+                                 extra='bloat repaired: {} -> {} bytes, {} real entries kept'.format(sz, new_sz, len(real)))
+            _notify("Threat Blocked", "Hosts bloat auto-repaired ({} -> {} bytes)".format(sz, new_sz))
+        except Exception:
+            pass
+
+    def _hosts_readable(self):
+        return True
 
     _SUSPICIOUS_DIRS = ('\\appdata\\', '\\temp\\', '\\tmp\\', '\\programdata\\', '\\users\\public\\',
                         '\\downloads\\', '\\desktop\\', '\\recycle\\')
@@ -5338,6 +7443,8 @@ class LightTelemetryMonitor:
         tl = (target or detail or "").lower()
         etype, points = 'observe', 0
         if kind == 'processcreate':
+            # ABD: 被改写 PE 执行取证 / 可信签名镜像基线记录
+            _abd_note_processexec(self._parent, pid, ppid, name, proc_path or target)
             # 危险命令行分类(提权/服务/计划任务/Run键持久化/UAC bypass)
             for et, pts, rx in _DANGEROUS_CMD_PATTERNS:
                 try:
@@ -5350,8 +7457,16 @@ class LightTelemetryMonitor:
                 etype, points = 'script_run', 5
             else:
                 etype = etype or 'observe'
+            # 高危命令(TTP级): av_tamper/cred_dump/task_sched/persistence 命中即拦(白名单父进程放行)
+            if etype in ('av_tamper', 'cred_dump', 'task_sched', 'persistence'):
+                self._intercept_dangerous_cmd(pid, ppid, name, proc_path, target, detail, etype)
         elif kind in ('filecreate', 'filewrite', 'filemodify', 'filedrop'):
             etype = 'filedrop' if kind == 'filedrop' else 'file_op'
+            # ABD: 新建记录 / 既有 PE 原地改写检测(感染型病毒核心信号)
+            if kind == 'filecreate':
+                _abd_note_created(pid, target)
+            elif kind in ('filewrite', 'filemodify'):
+                _abd_note_filewrite(self._parent, pid, name, proc_path, target)
             if tl.endswith(_EXEC_EXTS_G) and any(d in tl for d in self._SUSPICIOUS_DIRS):
                 points = 5          # 可疑目录释放可执行
             elif kind == 'filedrop':
@@ -5361,8 +7476,8 @@ class LightTelemetryMonitor:
             if points == 0 and tl.endswith(_EXEC_EXTS_G) and 'engine' not in tl and 'sevenendpointsecurity' not in tl:
                 # 系统目录外的可执行落地仍记录类型(由快速拦截管线负责扫描)
                 etype = 'file_op'
-            # 银狐"白加黑": 代理DLL(version/winmm/dxgi等)落入可疑目录 -> 侧加载劫持前兆 +15
-            if os.path.basename(tl) in _SIDELOAD_PROXY_DLLS and any(d in tl for d in self._SUSPICIOUS_DIRS):
+            # 白加黑行为判定(非名单): 落盘DLL与System32/SysWOW64同名系统DLL重复 -> 侧载副本 +15
+            if tl.endswith('.dll') and _is_system_dll_replica(tl):
                 etype, points = 'dll_drop', 15
         elif kind == 'filedelete':
             etype, points = 'file_delete', 0
@@ -5405,6 +7520,71 @@ class LightTelemetryMonitor:
                 for k in [k for k, t in _seen.items() if now - t > 120]:
                     _seen.pop(k, None)
         _edr_add_event(pid, name, proc_path or target, etype, points, det[:300])
+
+    def _intercept_dangerous_cmd(self, pid, ppid, name, proc_path, target, detail, etype):
+        """高危命令检查: 命中即标记(告警+拦截记录), 处置分两种:
+        - DefenseMode 关闭: 终止命令执行者进程链(仅产品自身链放行);
+        - DefenseMode 开启: 不杀任何进程(语义=所有进程放行), 做命令效果补救 ——
+          schtasks 建的任务删除; Run键/Defender排除项由注册表轮询回滚兜底。"""
+        try:
+            if pid <= 0:
+                return
+            dm = bool(g_settings.get('DefenseMode', False))
+            pp = (proc_path or '')
+            if not dm:
+                ppl = pp.lower()
+                if ppl.startswith(BASE_DIR.lower()) or _in_engine_dir(ppl) or _in_infrasonic_dir(ppl):
+                    return
+            now = time.time()
+            key = ('cmdkill', int(pid))
+            with self._dedup_lock:
+                if now - self._dedup.get(key, 0) < 60:
+                    return
+            with self._dedup_lock:
+                self._dedup[key] = now
+            killed = False
+            chain_desc = name or ''
+            rm = getattr(self._parent, '_realtime_monitor', None)
+            if not dm and rm:
+                try:
+                    chain = rm._terminate_chain(pid, name or os.path.basename(target) or 'unknown',
+                                                target or '', full=True)
+                    chain_desc = " -> ".join("{}({})".format(n, p) for n, p, _tp, _ta in chain) or chain_desc
+                    killed = bool(chain)
+                except Exception:
+                    pass
+            remedied = ''
+            if dm and etype == 'task_sched':
+                # 效果补救: 删除刚创建的计划任务(不杀进程)
+                try:
+                    m = re.search(r'/tn\s+"?([^"\s/]+)"?', detail or '', re.I)
+                    if m:
+                        task = m.group(1)
+                        subprocess.run(['schtasks', '/delete', '/tn', task, '/f'],
+                                       capture_output=True, timeout=10,
+                                       creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                        remedied = 'task deleted: {}'.format(task)
+                        _log("[主防-命令补救] 已删除高危计划任务: {}".format(task))
+                except Exception:
+                    pass
+            _log("[主防-危险命令] {} {}: {}({}) | {}".format(
+                etype, '已终止' if killed else '已标记', name, pid, (detail or '')[:130]))
+            _etw_log("CMDCHK [{}] {}({}) dm={} killed={} | {}".format(
+                etype, name, pid, dm, killed, (detail or '')[:140]))
+            _record_interception('主防-危险命令', name or etype, target or detail,
+                                 threat_type=etype, confidence=80, engine='主防命令检查',
+                                 action='terminated' if killed else 'detected',
+                                 extra='{}PID:{} 父:{} 链:{} {}'.format(
+                                     'DM ' if dm else '', pid, pp[:70], chain_desc[:80], remedied))
+            _record_behavior(pid, name or 'Unknown.exe', target or '', ppid, '危险命令检查',
+                             '{} {}'.format(etype, (detail or '')[:150]))
+            _edr_add_event(pid, name or 'Unknown.exe', target or '', 'violation', 10,
+                           'Dangerous command [{}]: {}'.format(etype, (detail or '')[:120]))
+            done = threading.Event()
+            _gui_queue.put(lambda: self._show_alert(pid, name, target or detail, 80,
+                                                    ['{}: {}'.format(etype, (detail or '')[:80])], done))
+        except Exception:
+            pass
 
     def _handle_alert(self, msg):
         rule = msg.get("rule", "")
@@ -5506,7 +7686,8 @@ class LightTelemetryMonitor:
     def _show_alert(self, pid, name, path, score, reasons, done_event):
         """托盘模式:遥测拦截通知(与主防拦截一致), 拦截动作已在 _handle_alert 完成。"""
         try:
-            _notify("Threat Block", "Threat Block {}".format(name or 'Unknown.exe'))
+            _notify("Threat Blocked", "Threat Blocked {}".format(name or 'Unknown.exe'),
+                    pid=pid, name=name or 'Unknown.exe', path=path)
             _edr_report_chain(pid, name or 'Unknown.exe', path or '',
                               [('Telemetry rule hit', int(score or 0))] + [
                                   (str(r), 0) for r in (reasons or [])[:10]],
@@ -5561,7 +7742,7 @@ class MemoryGuard:
                     _log("[内存防护] 单轮扫描耗时 {:.1f}s, 略慢".format(_dt))
             except Exception as e:
                 _log("[内存防护] 轮询异常: {}".format(e))
-            self._stop.wait(0.3)
+            self._stop.wait(5.0)   # 0.3s -> 5s: 全局句柄表枚举单轮达秒级, 0.3s 间隔占空比近100%吃满一核
 
     # ---------- NT API ----------
     # 句柄表条目布局: 经典文档版 vs Win11新版(实测字段重排), 启动时按字段合法性自动探测
@@ -5785,7 +7966,8 @@ class MemoryGuard:
                                        'Handle to {} with VM access 0x{:x} (credential access)'.format(tname, acc))
                         _endpoint_log("LSASS-ACCESS owner={}({}) -> {}({}) acc=0x{:x}".format(
                             oname, pid, tname, tpid, acc))
-                        _notify("Threat Block", "Threat Block {}".format(oname or 'Unknown.exe'))
+                        _notify("Threat Blocked", "Threat Blocked {}".format(oname or 'Unknown.exe'),
+                                pid=pid, name=oname or 'Unknown.exe')
                 # ---- 跨进程内存写入/远程线程 ----
                 elif (acc & (self._VM_WRITE | self._CREATE_THREAD)) and tname and \
                         tname not in self._CRITICAL_TARGETS:
@@ -6024,9 +8206,11 @@ class MBRGuard:
         try:
             _name = _mbr_suspect_name()
             if restored:
-                _notify("Threat Block", "Threat Block {}, Rolled back the MBR operation".format(_name))
+                _notify("Threat Blocked", "Threat Blocked {}, Rolled back the MBR operation".format(_name),
+                        name=_name)
             else:
-                _notify("Threat Block", "Threat Block {}, MBR rollback failed (admin required)".format(_name))
+                _notify("Threat Blocked", "Threat Blocked {}, MBR rollback failed (admin required)".format(_name),
+                        name=_name)
         except Exception:
             pass
 
@@ -6762,6 +8946,8 @@ class RealtimeMonitor:
             _ok, _access = self._terminate_process(cur_pid)
             if _ok:
                 terminated.append((cur_name, cur_pid, cur_path, _access))
+                if cur_path:
+                    _tag_threat_path(cur_path, '拦截终止: {}'.format(name or cur_name or 'unknown'))
             info = procs.get(cur_pid)
             if not info:
                 break
@@ -6849,7 +9035,8 @@ class RealtimeMonitor:
                         continue
             for fp in targets:
                 try:
-                    if fp and os.path.isfile(fp) and not is_system_path(fp):
+                    if (fp and os.path.isfile(fp) and not is_system_path(fp)
+                            and not _in_engine_dir(fp) and not _in_infrasonic_dir(fp)):
                         fname = os.path.basename(fp)
                         if os.path.splitext(fp)[1].lower() not in _QUAR_JUDGE_EXTS:
                             # 非驱动/DLL: 不判毒, 直接回滚删除
@@ -6907,6 +9094,9 @@ class RealtimeMonitor:
             t = threading.Thread(target=self._process_loop, daemon=True)
             t.start()
             self._threads.append(t)
+            tw = threading.Thread(target=self._threat_watch_loop, daemon=True)
+            tw.start()
+            self._threads.append(tw)
             t2 = threading.Thread(target=self._sensitive_op_loop, daemon=True)
             t2.start()
             self._threads.append(t2)
@@ -6944,7 +9134,7 @@ class RealtimeMonitor:
         return _r
 
     def _sensitive_op_loop(self):
-        _SENSITIVE_EXTS = {'.exe', '.dll', '.sys', '.ocx', '.scr', '.cpl', '.drv', '.msi', '.com', '.pif'}
+        _SENSITIVE_EXTS = {'.exe', '.dll', '.sys', '.ocx', '.scr', '.cpl', '.drv', '.msi', '.com', '.pif', '.tmp'}
         _DRIVER_EXTS = {'.sys', '.drv'}
         _drop_tracker = {}
         _drop_lock = threading.Lock()
@@ -6976,7 +9166,23 @@ class RealtimeMonitor:
         threading.Thread(target=_drop_scan_worker, daemon=True, name='DropScanWorker').start()
 
         def _get_watch_dirs():
+            # 全目录监控: 固定磁盘根 + 用户高危深目录。
+            # 轮询非递归(只扫第一层), 深层目录(TEMP/Desktop/Downloads)必须单独列出;
+            # file-monitor 对这些目录有降噪跳过名单(appdata\local\temp 等), 兜底轮询是它们唯一的第二道覆盖。
             dirs = set()
+            try:
+                import ctypes as _ct
+                import string as _string
+                for drv in _string.ascii_uppercase:
+                    d = drv + ':\\'
+                    if os.path.exists(d) and os.path.isdir(d):
+                        try:
+                            if _ct.windll.kernel32.GetDriveTypeW(d) == 3:   # DRIVE_FIXED
+                                dirs.add(d)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
             for env_key in ('TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'PROGRAMDATA'):
                 val = os.environ.get(env_key)
                 if val:
@@ -7041,43 +9247,64 @@ class RealtimeMonitor:
                 _edr_add_event(ppid, pname, ppath, 'driver_drop', 15,
                                'Dropped driver file: {}'.format(filepath))
             _record_interception('敏感操作(驱动安装)', fname, filepath, threat_type='Driver Drop', action='blocked', extra=f'已阻止 {parent_info}')
-            # 驱动判毒: 威胁 -> 隔离(不删除) + Threat Quarantined; 干净 -> 删除 + Threat Block
+            # 驱动判毒: 威胁 -> 隔离(不删除) + Threat Quarantined; 干净 -> 拦截 + 隔离
             verdict, _vt = "CLEAN", ""
             try:
                 if g_scanner:
                     verdict, _vc, _vt = g_scanner.scan_file(filepath)
             except Exception:
                 verdict = "CLEAN"
+            _quar_ok = False
             if verdict.startswith("MALICIOUS"):
                 dest = _quarantine_file(filepath, _vt or 'Driver Threat')
                 if dest:
-                    _notify("Threat Quarantined", "Threat Quarantined {}".format(fname))
+                    _quar_ok = True
+                    _notify("Threat Quarantined", "Threat Quarantined {}".format(fname),
+                            name=fname, path=filepath)
                     _log(f"[拦截-文件] 驱动判毒隔离: {fname} [{_vt}]")
                 else:
                     _log(f"[拦截-文件] 驱动隔离失败: {fname}")
             else:
-                try:
-                    os.remove(filepath)
-                    _log(f"[拦截-文件] 驱动释放已拦截并删除: {fname}")
-                except Exception:
-                    _log(f"[拦截-文件] 驱动释放删除失败: {fname}")
-                _notify("Threat Block", "Threat Block {}".format(fname))
+                _qdest = _quarantine_file(filepath, 'Driver Drop')
+                if _qdest:
+                    _quar_ok = True
+                    _log(f"[拦截-文件] 驱动释放已拦截并隔离: {fname}")
+                    _notify("Threat Quarantined", "Threat Quarantined {}".format(fname),
+                            name=fname, path=filepath)
+                else:
+                    try:
+                        os.remove(filepath)
+                        _log(f"[拦截-文件] 驱动释放已拦截并删除(隔离失败): {fname}")
+                    except Exception:
+                        _log(f"[拦截-文件] 驱动释放删除失败: {fname}")
+                    _notify("Threat Blocked", "Threat Blocked {}".format(fname),
+                            name=fname, path=filepath)
             if parent:
                 ppid, pname, ppath, _ = parent
                 _ok, _acc = self._terminate_process(ppid)
                 if _ok:
                     _log(f"[拦截-进程] 终止驱动释放进程: {pname}({ppid}) 权限:0x{_acc:04x}")
-                    # 通知已由上方判毒分支发出(Threat Quarantined / Threat Block), 此处不重复
+                    # 通知已由上方判毒分支发出, 此处不重复
                     _edr_report_chain(ppid, pname, ppath,
                                       [('Dropped driver file: {}'.format(fname), 15),
-                                       ('Driver install blocked + source terminated', 10)],
-                                      action='blocked')
+                                       ('Driver install blocked, file quarantined' if _quar_ok
+                                        else 'Driver install blocked + source terminated', 10)],
+                                      action='quarantined' if _quar_ok else 'blocked')
+            elif _quar_ok:
+                _edr_report_chain(0, fname, filepath,
+                                  [('Dropped driver file: {}'.format(fname), 15),
+                                   ('Driver drop quarantined', 10)],
+                                  action='quarantined')
             return 'block'
         def _scan_dropped_file(filepath):
             try:
                 # 已安装软件目录硬保护: Programs/Program Files 下的文件绝不扫描/删除(正规软件DLL曾误杀)
                 _fl = filepath.lower()
                 if '\\programs\\' in _fl or 'program files' in _fl:
+                    return
+                if _in_engine_dir(filepath):
+                    return
+                if _in_infrasonic_dir(filepath):
                     return
                 if os.path.getsize(filepath) < 64:
                     return
@@ -7113,14 +9340,13 @@ class RealtimeMonitor:
                 ppid, pname, ppath, _ = parent
                 _record_behavior(ppid, pname, ppath, 0, '文件落盘', f'释放: {filepath}')
                 _record_dropped_file(ppid, filepath)
-                # EDR 记分: DLL释放 +5, 其他落盘 +5; 银狐白加黑代理DLL +15
+                # EDR 记分: DLL释放 +5, 其他落盘 +5; 白加黑行为判定(系统DLL副本) +15
                 _drop_ext = os.path.splitext(filepath)[1].lower()
-                _drop_is_proxy = (os.path.basename(filepath).lower() in _SIDELOAD_PROXY_DLLS
-                                  and any(d in filepath.lower() for d in ('\\temp\\', '\\appdata\\', '\\programdata\\', '\\users\\public\\', '\\downloads\\')))
+                _drop_is_proxy = (_drop_ext == '.dll' and _is_system_dll_replica(filepath))
                 _edr_add_event(ppid, pname, ppath,
                                'dll_drop' if _drop_ext == '.dll' else 'file_op',
                                15 if _drop_is_proxy else 5,
-                               '{}: {}'.format('Proxy DLL drop (sideload staging)' if _drop_is_proxy else 'Dropped file', filepath))
+                               '{}: {}'.format('System DLL replica drop (sideload staging)' if _drop_is_proxy else 'Dropped file', filepath))
                 try:
                     pres, pconf, pvt = self._scan_file_subprocess(ppath, quick=True, timeout=15, bg=True)
                     if pres.startswith("MALICIOUS"):
@@ -7144,12 +9370,22 @@ class RealtimeMonitor:
                                           [('Dropped malicious file: {}'.format(os.path.basename(filepath)), 20),
                                            ('Dropper process malicious [{}]'.format(pvt), 15)],
                                           action='blocked')
-                        _quarantine_new_drop(filepath, pvt)
+                        _quarantine_new_drop(filepath, pvt, enforce=True)
                         return
                 except:
                     pass
             try:
-                res, conf, vt = self._scan_file_subprocess(filepath, quick=False, timeout=30, bg=True)
+                # EICAR 标准测试特征预检(非PE, 模型不判): 命中即按恶意处置, 不进模型
+                res = conf = vt = None
+                try:
+                    with open(filepath, 'rb') as _ef:
+                        if b'EICAR-STANDARD-ANTIVIRUS-TEST-FILE' in _ef.read(512):
+                            res, conf, vt = "MALICIOUS|EICAR", 100, "EICAR"
+                            _log("[拦截-文件] EICAR 测试特征命中: {}".format(os.path.basename(filepath)))
+                except Exception:
+                    pass
+                if res is None:
+                    res, conf, vt = self._scan_file_subprocess(filepath, quick=False, timeout=30, bg=True)
                 if res.startswith("MALICIOUS"):
                     fname = os.path.basename(filepath)
                     _log(f"[拦截-文件] 释放文件检测为恶意: {fname} [{vt}] {conf}%")
@@ -7183,7 +9419,7 @@ class RealtimeMonitor:
                         _edr_report_chain(0, fname, filepath,
                                           [('Dropped malicious file: {} [{}]'.format(fname, vt), 20)],
                                           action='blocked')
-                    _quarantine_new_drop(filepath, vt)
+                    _quarantine_new_drop(filepath, vt, enforce=True)
                 else:
                     # 纵深防御: 引擎判白后端点仍独立研判
                     _sec = None
@@ -7200,7 +9436,14 @@ class RealtimeMonitor:
                                              action='blocked', extra=_sec[0])
                         if parent:
                             _record_behavior(parent[0], parent[1], parent[2], 0, '端点研判拦截落盘', f'{fname} 评分{_sec[1]}')
-                        _quarantine_new_drop(filepath, 'Endpoint-Secondary: {}'.format(_sec[0]))
+                        _qsec = _quarantine_new_drop(filepath, 'Endpoint-Secondary: {}'.format(_sec[0]), enforce=True)
+                        if _qsec == 'quarantined':
+                            _edr_report_chain(parent[0] if parent else 0,
+                                              parent[1] if parent else fname,
+                                              parent[2] if parent else filepath,
+                                              [('Dropped file flagged by endpoint-secondary: {} ({})'.format(fname, _sec[0]), 10),
+                                               ('File quarantined', 0)],
+                                              action='quarantined')
             except:
                 pass
         _wd = _get_watch_dirs()
@@ -7260,6 +9503,40 @@ class RealtimeMonitor:
             if time.time() - _hb > 60:
                 _hb = time.time()
                 _log("[实时防护][心跳] loop alive, known={}".format(len(self._known_pids)))
+            # 威胁标签循环击杀: 已移交专用快速线程 _threat_watch_loop(250ms), 此处不再轮询
+            if g_settings.get("DefenseMode", False):
+                # DefenseMode: 不做进程扫描/进程拦截, 所有进程放行。
+                # 仅维护进程表(记录退出进程冻结行为链) + 高危命令采集:
+                # 新进程仍喂遥测快速通道(毫秒级cmdline) —— schtasks /create、
+                # Add-MpPreference、reg add Run、凭据转储等TTP命令由主防命中即拦
+                # (终止命令执行者), 这属于主防行为拦截, 不是进程扫描。
+                try:
+                    current = self._enum_processes_lite()
+                    exited_pids = self._known_pids - set(current.keys())
+                    for _dpid in exited_pids:
+                        _mark_process_exited(_dpid)
+                    new_pids = set(current.keys()) - self._known_pids
+                    self._known_pids = set(current.keys())
+                    if g_settings.get("etw_telemetry", True):
+                        _tm = getattr(g_window, '_etw_monitor', None)
+                        if _tm and hasattr(_tm, 'on_new_process'):
+                            for pid in new_pids:
+                                if pid in (0, self._self_pid):
+                                    continue
+                                info = current.get(pid)
+                                if not info:
+                                    continue
+                                name, path, ppid = info
+                                if not path:
+                                    path = self._get_process_path(pid)
+                                try:
+                                    _tm.on_new_process(pid, name, path or name, ppid, '')
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+                self._stop_flag.wait(2)
+                continue
             if g_settings.get("process_protect", True):
                 try:
                     current = self._enum_processes_lite()
@@ -7281,6 +9558,12 @@ class RealtimeMonitor:
                             if path:
                                 current[pid] = (name, path, ppid)
                         if path:
+                            # 自家工具目录(Infrasonic=kvc/defendnot, SevenEngine): 永不拦截
+                            # 且清除历史拦截标记, 否则kvc.exe被当恶意反复击杀,PPL保护无法执行
+                            if _in_infrasonic_dir(path) or _in_engine_dir(path):
+                                with self._terminated_lock:
+                                    self._terminated_paths.pop(path.lower(), None)
+                                continue
                             with self._terminated_lock:
                                 is_zombie = path.lower() in self._terminated_paths
                                 _inflight = (time.time() - self._scan_inflight.get(path.lower(), 0)) < 180
@@ -7299,7 +9582,8 @@ class RealtimeMonitor:
                                     _record_interception('进程拦截(重复启动)', name, path, action='terminated', extra=f'PID:{pid} 权限:0x{_z_access:04x}')
                                     _record_behavior(pid, name, path, ppid, '重复启动拦截', f'权限:0x{_z_access:04x}')
                                     # 重复拦截通知: Threat Block {exe}
-                                    _notify("Threat Block", "Threat Block {}".format(name or 'Unknown.exe'))
+                                    _notify("Threat Blocked", "Threat Blocked {}".format(name or 'Unknown.exe'),
+                                            pid=pid, name=name or 'Unknown.exe', path=path)
                                     # 整链处置: 终止其父链+全部子孙(所有触及的exe) + 回滚整链落盘
                                     threading.Thread(target=self._chain_kill_and_rollback,
                                                      args=(pid, name, path), daemon=True).start()
@@ -7434,6 +9718,81 @@ class RealtimeMonitor:
             pass
         self._handle_new_process(pid, name, path, ppid)
 
+    def _threat_watch_loop(self):
+        """威胁标签快速击杀线程(250ms): 按映像名预过滤的轻量快照, 命中即杀;
+        同时连坐其父进程(重生驱动) —— 打断重生循环, 而不是只杀重生体。"""
+        k32 = ctypes.windll.kernel32
+        while not self._stop_flag.is_set():
+            try:
+                if not _g_threat_tags:
+                    self._stop_flag.wait(0.05)
+                    continue
+                tag_names = {os.path.basename(p).lower() for p in _g_threat_tags}
+                if not tag_names:
+                    self._stop_flag.wait(0.05)
+                    continue
+                # 轻量快照(name+ppid, 不解析路径)
+                from ctypes import wintypes as _wt
+
+                class _PE(ctypes.Structure):
+                    _fields_ = [("dwSize", _wt.DWORD), ("cntUsage", _wt.DWORD),
+                                ("th32ProcessID", _wt.DWORD), ("th32DefaultHeapID", ctypes.c_size_t),
+                                ("th32ModuleID", _wt.DWORD), ("cntThreads", _wt.DWORD),
+                                ("th32ParentProcessID", _wt.DWORD), ("pcPriClassBase", ctypes.c_long),
+                                ("dwFlags", _wt.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+                k32.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+                hs = k32.CreateToolhelp32Snapshot(0x2, 0)
+                if not hs or hs == ctypes.c_void_p(-1).value:
+                    self._stop_flag.wait(0.25)
+                    continue
+                pairs = {}
+                try:
+                    pe = _PE()
+                    pe.dwSize = ctypes.sizeof(pe)
+                    ok = k32.Process32FirstW(ctypes.c_void_p(hs), ctypes.byref(pe))
+                    while ok:
+                        nm = (pe.szExeFile or '').lower()
+                        if nm in tag_names:
+                            pairs[int(pe.th32ProcessID)] = (nm, int(pe.th32ParentProcessID))
+                        ok = k32.Process32NextW(ctypes.c_void_p(hs), ctypes.byref(pe))
+                finally:
+                    k32.CloseHandle(ctypes.c_void_p(hs))
+                for pid, (nm, ppid) in pairs.items():
+                    if pid in (0, self._self_pid):
+                        continue
+                    path = self._get_process_path(pid)
+                    if not path or not _is_threat_tagged(path):
+                        continue
+                    _ok, _acc = self._terminate_process(pid)
+                    if _ok:
+                        _log("[威胁标签] 250ms快速击杀: {}({}) [{}]".format(nm, pid, path))
+                        _record_interception('威胁标签循环击杀', nm, path,
+                                             threat_type=_g_threat_tags.get(os.path.normcase(os.path.normpath(path)), 'Threat'),
+                                             confidence=100, engine='威胁标签', action='terminated',
+                                             extra='重生进程循环击杀 PID:{}'.format(pid))
+                        _notify("Threat Blocked", "Threat Blocked {}".format(nm or os.path.basename(path)),
+                                pid=pid, name=nm, path=path)
+                    # 连坐父进程(重生驱动): 非系统/非自家 -> 标记+终止, 打断重生循环
+                    if ppid and ppid not in (0, self._self_pid):
+                        ppath = self._get_process_path(ppid)
+                        if ppath and not is_system_path(ppath) \
+                                and not _in_engine_dir(ppath) and not _in_infrasonic_dir(ppath) \
+                                and not _is_threat_tagged(ppath):
+                            _tag_threat_path(ppath, '重生驱动: {}'.format(nm))
+                            pok, pacc = self._terminate_process(ppid)
+                            if pok:
+                                _log("[威胁标签] 已连坐终止重生驱动: {}({}) -> {}".format(
+                                    os.path.basename(ppath), ppid, nm))
+                                _record_interception('威胁标签循环击杀', os.path.basename(ppath), ppath,
+                                                     threat_type='Respawn Driver', confidence=100,
+                                                     engine='威胁标签', action='terminated',
+                                                     extra='连坐终止重生驱动 PID:{} -> {}'.format(ppid, nm))
+                                _notify("Threat Blocked", "Threat Blocked {}".format(os.path.basename(ppath)),
+                                        pid=ppid, name=os.path.basename(ppath), path=ppath)
+            except Exception:
+                pass
+            self._stop_flag.wait(0.02)
+
     def _handle_msiexec_install(self, pid, name, path):
         """msiexec启动MSI:提取.msi路径→引擎全量分析→恶意终止msiexec并告警。"""
         try:
@@ -7506,7 +9865,8 @@ class RealtimeMonitor:
     def _show_msi_alert(self, pid, msi_path, score, reasons, done_event):
         """托盘模式:MSI拦截通知(动作已在 _handle_msiexec_install 完成)。"""
         try:
-            _notify("Threat Block", "Threat Block {}".format(os.path.basename(msi_path) or 'Unknown.exe'))
+            _notify("Threat Blocked", "Threat Blocked {}".format(os.path.basename(msi_path) or 'Unknown.exe'),
+                    pid=pid, name=os.path.basename(msi_path) or 'Unknown.exe', path=msi_path)
             _edr_report_chain(pid, os.path.basename(msi_path) or 'Unknown.exe', msi_path,
                               [('Malicious MSI package', int(score or 0))] + [
                                   (str(r), 0) for r in (reasons or [])[:10]],
@@ -7560,7 +9920,8 @@ class RealtimeMonitor:
                     _endpoint_log("REPEAT-BLOCK {}({}) {} acc=0x{:04x}".format(name, pid, path, _acc))
                     _record_interception('进程拦截(重复启动)', name, path, action='terminated', extra=f'PID:{pid} 权限:0x{_acc:04x}')
                     _record_behavior(pid, name, path, ppid, '重复启动拦截', f'权限:0x{_acc:04x}')
-                    _notify("Threat Block", "Threat Block {}".format(name or 'Unknown.exe'))
+                    _notify("Threat Blocked", "Threat Blocked {}".format(name or 'Unknown.exe'),
+                            pid=pid, name=name or 'Unknown.exe', path=path)
                 return
             with self._dedup_lock:
                 last = self._recent_scanned.get(path, 0)
@@ -7599,7 +9960,7 @@ class RealtimeMonitor:
                 if os.path.normpath(path).lower() == os.path.normpath(sys.executable).lower():
                     return
             try:
-                main_script = os.path.abspath(__file__)
+                main_script = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(__file__)
                 if os.path.normpath(path).lower() == os.path.normpath(main_script).lower():
                     return
             except:
@@ -7875,6 +10236,13 @@ class BehaviorEDR:
                                 continue
                         except Exception:
                             pass
+                        # 自家工具目录豁免(Infrasonic=kvc/defendnot, SevenEngine):
+                        # kvc.exe加载自身PyInstaller解压目录的vcruntime会被误判黑DLL侧载
+                        try:
+                            if _in_infrasonic_dir(path) or _in_engine_dir(path):
+                                continue
+                        except Exception:
+                            pass
                         try:
                             if is_system_path(path):
                                 continue
@@ -7932,7 +10300,7 @@ class BehaviorEDR:
                         in_exe_dir = exe_dir and mpl.startswith(exe_dir)
                         if not in_sys and not in_exe_dir:
                             mn = (me.szModule or '').lower()
-                            if mn in (_SIDELOAD_PROXY_DLLS | EDR_SYSTEM_DLL_NAMES):
+                            if mn.endswith('.dll') and _dup_system_dll_name(mn):
                                 hit = '{} <- {}'.format(mn, mp)
                                 break
                 except Exception:
@@ -8073,7 +10441,7 @@ class BehaviorEDR:
             reasons.append("DLL落于可疑目录")
 
         # (f) 可疑API链(PE导入) - 仅对PE文件
-        if ext in ('.exe', '.dll', '.sys', '.scr', '.ocx'):
+        if ext in ('.exe', '.dll', '.sys', '.scr', '.ocx', '.com'):
             try:
                 pe_info = _parse_pe_all(path)
                 apis = set(pe_info.get('apis', []) or [])
@@ -8209,7 +10577,7 @@ class BehaviorEDR:
             # 跳过宿主自身目录的同级DLL(DLL planting的经典,但合法软件常用,保守)
             # 只关注落在可疑目录 或 伪装系统DLL名 的模块
             in_susp = any(tok in mpl for tok in EDR_SUSPICIOUS_DIR_TOKENS)
-            is_system_dll_name = mname in EDR_SYSTEM_DLL_NAMES
+            is_system_dll_name = mname.endswith('.dll') and _dup_system_dll_name(mname)
             if not (in_susp or is_system_dll_name):
                 continue
             # 检查签名
@@ -8303,7 +10671,8 @@ class BehaviorEDR:
     def _show_alert(self, pid, name, path, score, reasons, done_event):
         """托盘模式:EDR 拦截通知(终止/回滚动作已在 _handle_threat 完成)。"""
         try:
-            _notify("Threat Block", "Threat Block {}".format(name or 'Unknown.exe'))
+            _notify("Threat Blocked", "Threat Blocked {}".format(name or 'Unknown.exe'),
+                    pid=pid, name=name or 'Unknown.exe', path=path)
             _edr_report_chain(pid, name or 'Unknown.exe', path or '',
                               [('EDR behavior score {}'.format(int(score or 0)), int(score or 0))] + [
                                   (str(r), 0) for r in (reasons or [])[:10]],
@@ -9093,6 +11462,7 @@ class SevenEndPointWindow(QWidget):
         self.settings_page = SettingsPage(self._root_widget)
         self.tool_page = ToolPage(self._root_widget)
         self.about_page = AboutPage(self._root_widget)
+        self.about_page._main = self
         self.pages = {
             "home": self.home_page,
             "scan": self.scan_page,
@@ -9234,61 +11604,19 @@ class SevenEndPointWindow(QWidget):
             'esd\\', 'drvpath\\', 'drivers\\', 'driverstore\\',
             '$windows.~ws\\', '$windows.~q\\', 'windows.old\\',
             'programdata\\', 'windows defender\\', 'avast software\\',
+            os.path.normpath(SEVENGINE_DIR).lower().replace('/', '\\') + '\\',
+            'sevenengine\\',
+            os.path.normpath(INFRASONIC_DIR).lower().replace('/', '\\') + '\\',
+            'infrasonic\\',
         }
-        scan_exts = {'.exe', '.dll', '.sys', '.vbs', '.ps1', '.js', '.bat', '.cmd', '.py', '.pyw', '.msi'}
+        scan_exts = {'.exe', '.dll', '.sys', '.vbs', '.ps1', '.js', '.bat', '.cmd', '.py', '.pyw', '.msi', '.com'}
         import queue as _queue_mod
-        # exe 模式: 只起一个 SevenEngine 常驻进程, 避免多进程重复加载引擎; code 模式按CPU
-        # 核数缩放(修复固定8个在高核机器上吞吐不足/低核机器上进程过多的问题)。
-        _n_workers = 1 if _engine_use_exe() else max(4, min(16, (os.cpu_count() or 8)))
+        # 复用启动期预建的常驻引擎Worker池(_SCAN_WORKER_POOL)——全盘扫描不再临时拉起
+        # 专用进程: 主进程PPL封顶后无法创建新进程, 一切扫描Worker必须在封顶前就位。
+        _n_workers = max(2, min(8, (os.cpu_count() or 8)))
         _file_q = _queue_mod.Queue(maxsize=500)
         _stop_flag = threading.Event()
         _lock = threading.Lock()
-        _procs = []
-        try:
-            for _ in range(_n_workers):
-                _p = subprocess.Popen(
-                    _worker_cmd(),
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, bufsize=1, text=True,
-                    encoding='utf-8', errors='replace', cwd=BASE_DIR
-                )
-                # 热身: 等引擎解压+模型加载完成, 首个文件不再白等13秒。
-                # 修复阻塞: 旧代码裸 readline() 无超时, Worker 引擎加载卡死时
-                # 整个扫描启动线程永久挂起(扫描永远开始不了)。改为带超时的读线程。
-                try:
-                    _p.stdin.write(json.dumps({"path": "__warmup__"}) + "\n")
-                    _p.stdin.flush()
-                    _warm_box = {}
-                    def _warm_rd(pp=_p):
-                        try:
-                            _warm_box['line'] = pp.stdout.readline()
-                        except Exception:
-                            _warm_box['line'] = None
-                    _wt = threading.Thread(target=_warm_rd, daemon=True)
-                    _wt.start()
-                    _wt.join(timeout=120)
-                    if _wt.is_alive() or not _warm_box.get('line'):
-                        _log("[扫描] Worker热身超时/失败, 跳过该Worker")
-                        try:
-                            _p.kill()
-                        except Exception:
-                            pass
-                        continue
-                except Exception:
-                    pass
-                _procs.append(_p)
-        except Exception as _e:
-            _log(f"[扫描] 启动子进程失败: {_e}")
-            for _p in _procs:
-                try: _p.terminate()
-                except: pass
-            return
-        if not _procs:
-            # 全部Worker热身失败: 若无此守卫, 生产者会把文件塞满队列后永久阻塞
-            _log("[扫描] 无可用扫描Worker, 扫描中止")
-            _scan_log("[!] 扫描引擎Worker全部启动失败, 扫描中止")
-            _gui_queue.put(lambda: self.scan_page.progress_label.setText("扫描引擎启动失败"))
-            return
 
         def _walk_producer():
             try:
@@ -9377,6 +11705,40 @@ class SevenEndPointWindow(QWidget):
                 if _update_ui:
                     _gui_queue.put(lambda c=self._scanned_count, t=self._threat_count: self.scan_page.stat_label.setText(f"已扫描: {c}  |  威胁: {t}"))
 
+        def _manage_worker(idx):
+            while True:
+                try:
+                    fp = _file_q.get(timeout=2)
+                except:
+                    if _stop_flag.is_set():
+                        return
+                    continue
+                if fp is None:
+                    return
+                if self._stop_requested:
+                    continue
+                try:
+                    res, conf, vt = self._scan_file_subprocess(fp, quick=False, timeout=120, bg=True)
+                except Exception:
+                    res, conf, vt = "ERROR", 0, ""
+                with _lock:
+                    self._scanned_count += 1
+                _update_ui = (time.time() - self._last_ui_update >= 0.05)
+                if _update_ui:
+                    self._last_ui_update = time.time()
+                    _gui_queue.put(lambda p=fp: self.scan_page.current_file_label.setText(
+                        QFontMetrics(self.scan_page.current_file_label.font()).elidedText(
+                            p, Qt.TextElideMode.ElideMiddle, max(200, self.scan_page.current_file_label.width() - 8))))
+                if res.startswith("MALICIOUS"):
+                    with _lock:
+                        self._threat_count += 1
+                    _gui_queue.put(lambda c=self._scanned_count, t=self._threat_count: self.scan_page.stat_label.setText(f"已扫描: {c}  |  威胁: {t}"))
+                    _scan_log(f"[!] 发现威胁: {fp} [{vt}] {conf}%")
+                    _log(f"[威胁] {os.path.basename(fp)} [{vt}] {conf}%")
+                    self._add_threat_item(os.path.basename(fp), vt, conf, fp)
+                if _update_ui:
+                    _gui_queue.put(lambda c=self._scanned_count, t=self._threat_count: self.scan_page.stat_label.setText(f"已扫描: {c}  |  威胁: {t}"))
+
         _walk_t = threading.Thread(target=_walk_producer, daemon=True)
         _walk_t.start()
         _mgr_threads = []
@@ -9388,9 +11750,6 @@ class SevenEndPointWindow(QWidget):
             while True:
                 if self._stop_requested:
                     _stop_flag.set()
-                    for _p in _procs:
-                        try: _p.terminate()
-                        except: pass
                     break
                 _walk_alive = _walk_t.is_alive()
                 _mgr_alive = any(t.is_alive() for t in _mgr_threads)
@@ -9404,11 +11763,6 @@ class SevenEndPointWindow(QWidget):
                 except: break
             for _ in range(_n_workers):
                 try: _file_q.put_nowait(None)
-                except: pass
-            for _p in _procs:
-                try: _p.stdin.close()
-                except: pass
-                try: _p.kill()
                 except: pass
             for _t in _mgr_threads:
                 _t.join(timeout=5)
@@ -9718,10 +12072,8 @@ class SevenEndPointWindow(QWidget):
                     g_status = {"ok": True, "msg": "服务器已连接"}
                     server_ok = True
                     _log(">>> [API] 服务器已运行")
-                else:
-                    _log(">>> [API] 后端未运行 (pedefenseserver.exe 未启动)")
             except:
-                _log(">>> [API] 后端未运行 (pedefenseserver.exe 未启动)")
+                pass
             _gui_queue.put(lambda: self.home_page.update_engine("正在加载引擎组件..."))
             _gui_queue.put(lambda: self.home_page.update_engine_progress(0.3))
             _log(">>> [引擎] 特征库就绪 (SevenEngine)")
@@ -9797,16 +12149,48 @@ class SevenEndPointWindow(QWidget):
                 self._memory_guard = None
         def _task_etw():
             try:
-                if g_settings.get("etw_telemetry", False):
-                    if self._etw_monitor:
-                        self._etw_monitor.stop()
-                    em = LightTelemetryMonitor(self)
-                    em.start()
-                    self._etw_monitor = em
+                # 注册表/Hosts 回滚是核心主防能力, 不再受 etw_telemetry 开关门控
+                # (2026-10-25 事故: 发行版该开关为 false -> 回滚全停)
+                if self._etw_monitor:
+                    self._etw_monitor.stop()
+                em = LightTelemetryMonitor(self)
+                em.start()
+                self._etw_monitor = em
             except Exception as e:
                 _log(f"[遥测拦截] 启动失败: {e}")
+        def _task_wsc():
+            try:
+                if g_settings.get("wsc_takeover", False):
+                    _wsc_takeover(True)
+            except Exception as e:
+                _log(f"[安全中心] 启动重注册失败: {e}")
+        def _task_pool_prewarm():
+            try:
+                ws = _SCAN_WORKER_POOL._workers
+                ths = [threading.Thread(target=_w._ensure, daemon=True) for _w in ws]
+                for _t in ths:
+                    _t.start()
+                for _t in ths:
+                    _t.join(timeout=180)
+                _n = sum(1 for _w in ws if _w._ensure() is not None)
+                _log("[PPL] 常驻Worker池预热完成(并行): {}/{} 个".format(_n, len(ws)))
+            except Exception as e:
+                _log(f"[PPL] Worker池预热失败: {e}")
+            finally:
+                _g_pool_ready.set()
+        def _task_ppl():
+            try:
+                _ppl_guard_start()
+            except Exception as e:
+                _log(f"[PPL] 启动失败: {e}")
+        def _task_console():
+            try:
+                _console_start()
+            except Exception as e:
+                _log(f"[控制台] 启动失败: {e}")
         _threads = []
-        for _task in (_task_edr, _task_file, _task_mbr, _task_memory, _task_etw):
+        for _task in (_task_edr, _task_file, _task_mbr, _task_memory, _task_etw, _task_wsc,
+                      _task_pool_prewarm, _task_ppl, _task_console):
             _t = threading.Thread(target=_task, daemon=True)
             _t.start()
             _threads.append(_t)
@@ -9996,11 +12380,32 @@ def _setup_tray(app, window):
         act_about = QAction("关于 SevenEndPointSecurity", menu)
         act_about.triggered.connect(lambda: _show_about(window))
         menu.addAction(act_about)
+        act_quar = QAction("隔离区", menu)
+        def _open_quarantine():
+            try:
+                QuarantineDialog(window).exec()
+            except Exception as e:
+                _log(f"[托盘] 打开隔离区失败: {e}")
+        act_quar.triggered.connect(_open_quarantine)
+        menu.addAction(act_quar)
+        act_console = QAction("控制台", menu)
+        def _open_console():
+            try:
+                import webbrowser
+                webbrowser.open("http://127.0.0.1:{}".format(_CONSOLE_PORT_BASE))
+            except Exception as e:
+                _log(f"[托盘] 打开控制台失败: {e}")
+        act_console.triggered.connect(_open_console)
+        menu.addAction(act_console)
         menu.addSeparator()
         act_exit = QAction("退出程序", menu)
         act_exit.triggered.connect(lambda: _on_app_exit(window, tray))
         menu.addAction(act_exit)
         tray.setContextMenu(menu)
+        try:
+            tray.messageClicked.connect(_on_tray_message_clicked)
+        except Exception:
+            pass
         tray.activated.connect(lambda reason: _show_about(window) if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
         tray.show()
         window._tray = tray
@@ -10010,15 +12415,33 @@ def _setup_tray(app, window):
 
 def _show_about(window=None):
     try:
-        QMessageBox.information(
-            None, "SevenEndPointSecurity",
-            "SevenEndPointSecurity v3.0.0\n"
-            "EDR / Anti-Virus\n\n"
-            "Scan Engine: SevenEngine (LightGBM)\n"
-            "Protection: Realtime + Light Telemetry + Behavior EDR + MBR Guard\n\n"
-            "Copyright 2024-2026 NewEra Studio")
+        dlg = QDialog()
+        dlg.setWindowTitle("About SevenEndPointSecurity")
+        dlg.resize(660, 600)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(0, 0, 0, 0)
+        page = AboutPage(dlg)
+        page._main = window
+        lay.addWidget(page, 1)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+        btn_row.setContentsMargins(12, 6, 12, 10)
+        lay.addLayout(btn_row)
+        dlg.exec()
     except Exception:
-        pass
+        try:
+            QMessageBox.information(
+                None, "SevenEndPointSecurity",
+                "SevenEndPointSecurity v3.0.0\n"
+                "EDR / Anti-Virus\n\n"
+                "Scan Engine: SevenEngine (LightGBM)\n"
+                "Protection: Realtime + Light Telemetry + Behavior EDR + MBR Guard\n\n"
+                "Copyright 2024-2026 NewEra Studio")
+        except Exception:
+            pass
 
 
 def _on_app_exit(window=None, tray=None):
@@ -10115,6 +12538,7 @@ def main():
     app.setWindowIcon(app_icon())
     app.setQuitOnLastWindowClosed(False)
     _load_settings_json()
+    _apply_autostart(bool(g_settings.get('autostart_enabled', False)))
     window = SevenEndPointWindow()
     window.hide()   # 纯托盘模式: 不显示任何窗口, 只保留 Qt6 托盘 + 通知
     global g_window
@@ -10123,6 +12547,69 @@ def main():
     _notify("SevenEndPointSecurity", "Realtime protection active")
     app.aboutToQuit.connect(lambda: _cleanup_on_exit())
     sys.exit(app.exec())
+
+
+def _run_engine_worker_mode():
+    """V3 引擎常驻Worker: 加载一次模型, stdin JSON 行协议与 _ResidentScanWorker 对接。
+    (V3 exe 无 --WORKER 协议, 常驻快路径由本Worker承担)"""
+    _real_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    _se_mod = None
+    _model = None
+    try:
+        if SEVENGINE_DIR not in sys.path:
+            sys.path.insert(0, SEVENGINE_DIR)
+        import SevenEngine as _se
+        _model = _se.load_model()
+        _se_mod = _se
+    except Exception:
+        traceback.print_exc()
+        sys.exit(1)
+    finally:
+        sys.stdout = _real_stdout
+    try:
+        _real_stdout.reconfigure(line_buffering=True, encoding='utf-8')
+    except Exception:
+        pass
+    def _reply(fp, res, conf, vt):
+        try:
+            _real_stdout.write(json.dumps({"path": fp, "result": res, "conf": conf, "vt": vt},
+                                          ensure_ascii=False) + "\n")
+            _real_stdout.flush()
+        except Exception:
+            return False
+        return True
+    def _stdin_loop():
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+            except Exception:
+                continue
+            fp = req.get("path")
+            if fp is None:
+                return
+            if fp == "__warmup__":
+                _reply(fp, "CLEAN", 0, "")
+                continue
+            try:
+                st, score = _se_mod.scan_file(fp, _model)
+            except Exception:
+                st, score = "error", None
+            if st == "malware":
+                _reply(fp, "MALICIOUS|Gen.Malware|ML", int(score or 0), "ML:Gen.Malware")
+            elif st == "clean":
+                _reply(fp, "CLEAN", int(score or 0), "")
+            else:
+                _reply(fp, "ERROR", 0, "")
+    # 独立存活: stdin断开(管道意外中断)不退出, 仅当主进程真正退出时跟随退出
+    threading.Thread(target=_stdin_loop, daemon=True, name='EngineWorkerStdin').start()
+    _main_pid = int(os.environ.get('SEVEN_MAIN_PID') or 0) or os.getppid()
+    while _main_alive(_main_pid):
+        time.sleep(2)
+    os._exit(0)
 
 
 def _run_worker_mode():
@@ -10139,31 +12626,37 @@ def _run_worker_mode():
         _real_stdout.reconfigure(line_buffering=True, encoding='utf-8')
     except Exception:
         pass
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            req = json.loads(line)
-        except Exception:
-            continue
-        fp = req.get("path")
-        if fp is None:
-            break
-        quick = req.get("quick", False)
-        try:
-            if quick and hasattr(scanner, "scan_file_quick"):
-                res, conf, vt = scanner.scan_file_quick(fp)
-            else:
-                res, conf, vt = scanner.scan_file(fp)
-        except Exception:
-            res, conf, vt = "ERROR", 0, ""
-        out = {"path": fp, "result": res, "conf": conf, "vt": vt}
-        try:
-            _real_stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
-            _real_stdout.flush()
-        except Exception:
-            break
+    def _stdin_loop():
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                req = json.loads(line)
+            except Exception:
+                continue
+            fp = req.get("path")
+            if fp is None:
+                return
+            quick = req.get("quick", False)
+            try:
+                if quick and hasattr(scanner, "scan_file_quick"):
+                    res, conf, vt = scanner.scan_file_quick(fp)
+                else:
+                    res, conf, vt = scanner.scan_file(fp)
+            except Exception:
+                res, conf, vt = "ERROR", 0, ""
+            out = {"path": fp, "result": res, "conf": conf, "vt": vt}
+            try:
+                _real_stdout.write(json.dumps(out, ensure_ascii=False) + "\n")
+                _real_stdout.flush()
+            except Exception:
+                return
+    threading.Thread(target=_stdin_loop, daemon=True, name='WorkerStdin').start()
+    _main_pid = int(os.environ.get('SEVEN_MAIN_PID') or 0) or os.getppid()
+    while _main_alive(_main_pid):
+        time.sleep(2)
+    os._exit(0)
 
 
 def _run_file_monitor_mode():
@@ -10218,6 +12711,12 @@ def _run_file_monitor_mode():
     ntdll.NtResumeProcess.restype = wintypes.LONG
 
     _rm_ok = False
+    try:
+        _fm_admin = ctypes.windll.shell32.IsUserAnAdmin() != 0
+        sys.stderr.write("[file-monitor] process elevated(admin)={}\n".format(_fm_admin))
+        sys.stderr.flush()
+    except Exception:
+        pass
     try:
         rstrtmgr = ctypes.WinDLL('rstrtmgr.dll')
         rstrtmgr.RmStartSession.restype = wintypes.DWORD
@@ -10444,7 +12943,6 @@ def _run_file_monitor_mode():
     # ---- 新落盘处置(全盘, 只管新文件不扫存量) ----
     _DROP_SCAN_EXTS = {'.exe', '.scr', '.com', '.ocx', '.msi', '.bat', '.cmd',
                        '.ps1', '.vbs', '.js', '.jse', '.wsf', '.py', '.pyw'}
-    _BLACK_DLL_NAMES = _SIDELOAD_PROXY_DLLS | EDR_SYSTEM_DLL_NAMES
     _stdout_lock = threading.Lock()
     _drop_sent = {}
     _drop_sent_lock = threading.Lock()
@@ -10470,22 +12968,25 @@ def _run_file_monitor_mode():
 
     def _monitor_new_drop(path):
         """新落盘处置(全盘): 可执行/脚本 -> 转交主进程引擎扫描(既有Worker管线,不占主防资源);
-        黑DLL(白加黑侧载名单) -> 定位宿主进程并上报主进程拦截(终止链+删DLL)。
-        DLL不送引擎扫描, 只拦新落盘 + 被调用/注入(后者由主进程BehaviorEDR负责)。"""
+        DLL -> 全部上报主进程做行为判定(与System32/SysWOW64同名系统DLL重复=侧载副本拦截,
+        非名单制); 普通DLL由主进程转引擎扫描。"""
         try:
+            _dbg = os.environ.get('_SEP_DBG')
             ext = os.path.splitext(path)[1].lower()
+            if _dbg:
+                sys.stderr.write("[file-monitor] new-drop: {} (ext={})\n".format(path, ext))
+                sys.stderr.flush()
             if ext == '.dll':
-                bn = os.path.basename(path).lower()
-                if bn in _BLACK_DLL_NAMES and not is_system_path(path) \
-                        and _drop_msg_dedup(path.lower()):
-                    host = _find_proc_using_file(path)
-                    hpid, hn, hp = (host[0] if host else (0, '', ''))
-                    _send_worker_msg({"type": "black_dll", "path": path,
-                                      "proc_pid": hpid, "proc_name": hn, "proc_path": hp})
-                    sys.stderr.write("[file-monitor] BLACK-DLL drop: {} host={}({})\n".format(path, hn, hpid))
-                    sys.stderr.flush()
+                if not is_system_path(path) and _drop_msg_dedup(path.lower()):
+                    if _dbg:
+                        sys.stderr.write("[file-monitor] DLL-DROP push: {}\n".format(path))
+                        sys.stderr.flush()
+                    _send_worker_msg({"type": "dll_drop", "path": path})
                 return
             if ext in _DROP_SCAN_EXTS and _drop_msg_dedup(path.lower()):
+                if _dbg:
+                    sys.stderr.write("[file-monitor] DROP-SCAN push: {}\n".format(path))
+                    sys.stderr.flush()
                 _send_worker_msg({"type": "drop_scan", "path": path})
         except Exception:
             pass
@@ -10763,6 +13264,9 @@ def _run_file_monitor_mode():
             except Exception:
                 break
             if not line:
+                # stdin断开(管道意外中断)不退出: 独立存活, 由主进程存活检测决定生命周期
+                while not stop_flag.is_set():
+                    time.sleep(2)
                 break
             line = line.strip()
             if not line:
@@ -10933,7 +13437,11 @@ def _run_file_monitor_mode():
                     except Exception:
                         name = ""
                     full = os.path.join(d, name)
-                    if _should_skip_path(full):
+                    # 目录降噪跳过 —— 但敏感后缀(.dll/_DROP_SCAN_EXTS)永不跳过:
+                    # TEMP/cache 里的恶意释放物正是检测目标(降噪只为勒索计数性能)
+                    _ext_sens = (os.path.splitext(full)[1].lower() in _DROP_SCAN_EXTS
+                                 or full.lower().endswith('.dll'))
+                    if _should_skip_path(full) and not _ext_sens:
                         if info.NextEntryOffset == 0:
                             break
                         offset += info.NextEntryOffset
@@ -11143,6 +13651,16 @@ def _run_file_monitor_mode():
     _stdin_t = threading.Thread(target=_stdin_reader, daemon=True)
     _stdin_t.start()
 
+    _main_pid = int(os.environ.get('SEVEN_MAIN_PID') or 0)
+    def _main_watch():
+        # 独立存活: 仅当主进程真正退出时跟随退出(管道断开不影响)
+        while not stop_flag.is_set():
+            if _main_pid and not _main_alive(_main_pid):
+                stop_flag.set()
+                break
+            time.sleep(3)
+    threading.Thread(target=_main_watch, daemon=True, name='MainWatch').start()
+
     while not stop_flag.is_set():
         now = time.time()
         with state_lock:
@@ -11332,6 +13850,8 @@ def _run_file_monitor_mode():
 if __name__ == '__main__':
     if '--worker' in sys.argv:
         _run_worker_mode()
+    elif '--engine-worker' in sys.argv:
+        _run_engine_worker_mode()
     elif '--file-monitor' in sys.argv:
         _run_file_monitor_mode()
     elif '--quarantinelist' in sys.argv:

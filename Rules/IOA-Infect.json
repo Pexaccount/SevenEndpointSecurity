@@ -1,0 +1,13 @@
+{
+  "version": "1.0",
+  "_doc": "ABD 感染链行为关联(ABD = 行为分析检测)。与 IOA-*.json 同构 schema, 由 _load_ioa_rules 自动热加载。信号 pe_infect_write(既有 PE 被无签名/签名失效进程原地改写) + infected_exec(该 PE 之后被其他进程链执行) => 感染链成立。窗口取上限 86400s: 感染型病毒写入宿主到宿主被执行可能间隔很久。误报闸门: 写时签名有效=合法更新不产生 pe_infect_write; 同链自写自跑不触发; 单信号不成链。",
+  "rules": [
+    {
+      "name": "ABD-1 感染链(改写既有PE+宿主执行)",
+      "signals": [["pe_infect_write", null], ["infected_exec", null]],
+      "window": 86400,
+      "points": 30,
+      "enabled": true
+    }
+  ]
+}

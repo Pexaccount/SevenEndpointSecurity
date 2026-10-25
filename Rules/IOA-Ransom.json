@@ -1,0 +1,11 @@
+{
+  "rules": [
+    {
+      "name": "IOA-3 勒索破坏链",
+      "signals": [["privilege", "vssadmin|bcdedit|wbadmin|cipher"], ["ransom_op", null]],
+      "window": 900,
+      "points": 25,
+      "enabled": true
+    }
+  ]
+}

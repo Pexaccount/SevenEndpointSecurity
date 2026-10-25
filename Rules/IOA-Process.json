@@ -1,0 +1,35 @@
+{
+  "rules": [
+    {
+      "name": "IOA-1 凭据窃取链",
+      "signals": [["lsass_access", null], ["cred_dump", null]],
+      "window": 600,
+      "points": 25,
+      "enabled": true
+    },
+    {
+      "name": "IOA-2 凭据转储+注入",
+      "signals": [["cred_dump", null], ["injection", null]],
+      "window": 600,
+      "points": 25,
+      "enabled": true
+    },
+    {
+      "name": "IOA-5 提权+凭据窃取",
+      "signals": [["uac_bypass", null], ["cred_dump", null]],
+      "window": 600,
+      "points": 25,
+      "enabled": true
+    },
+    {
+      "name": "IOA-6 白加黑侧载注入链",
+      "signals": [
+        ["dll_drop", "version|winmm|dbghelp|dxgi|d3d|winhttp|usp10|wintrust"],
+        ["injection", null]
+      ],
+      "window": 900,
+      "points": 20,
+      "enabled": true
+    }
+  ]
+}

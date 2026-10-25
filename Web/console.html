@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SevenEndpoint Console</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --side:#0f172a; --side-txt:#94a3b8; --side-on:#e2e8f0;
+    --panel:#ffffff; --border:#e3e8ef; --text:#1f2937; --muted:#6b7280;
+    --accent:#2563eb; --accent-soft:#eff4ff; --ok:#16a34a; --warn:#d97706; --bad:#dc2626;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",sans-serif;font-size:14px;display:flex;min-height:100vh}
+  /* ===== sidebar ===== */
+  aside{width:218px;flex:none;background:var(--side);display:flex;flex-direction:column;padding:18px 12px}
+  .brand{display:flex;align-items:center;gap:10px;padding:4px 8px 18px}
+  .brand img{width:34px;height:34px}
+  .brand b{color:#fff;font-size:14.5px;line-height:1.25}
+  .brand small{color:var(--side-txt);font-size:10.5px;display:block}
+  nav{display:flex;flex-direction:column;gap:3px;margin-top:6px}
+  nav a{display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:9px;color:var(--side-txt);text-decoration:none;font-size:13.5px;cursor:pointer;transition:background .15s ease,color .15s ease,transform .15s ease}
+  nav a svg{width:16px;height:16px;flex:none}
+  nav a:hover{background:rgba(255,255,255,.07);color:var(--side-on);transform:translateX(2px)}
+  nav a.on{background:var(--accent);color:#fff}
+  nav a.on:hover{transform:none}
+  .sidefoot{margin-top:auto;padding:10px 8px;color:#475569;font-size:10.5px;line-height:1.6}
+  /* ===== main ===== */
+  .wrap{flex:1;min-width:0;display:flex;flex-direction:column}
+  topbar{background:var(--panel);border-bottom:1px solid var(--border);padding:12px 26px;display:flex;align-items:center}
+  topbar h1{font-size:16px;font-weight:600}
+  .conn{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--muted);font-size:12px}
+  .conn i{width:9px;height:9px;border-radius:50%;background:var(--ok);display:inline-block;transition:background .3s}
+  .conn.off i{background:var(--bad)}
+  main{flex:1;padding:20px 26px;max-width:1200px;width:100%}
+  /* page transition */
+  .page{display:none}
+  .page.on{display:block;animation:pageIn .24s cubic-bezier(.2,.7,.3,1)}
+  @keyframes pageIn{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  .grid{display:grid;gap:16px}
+  .g2{grid-template-columns:1fr 1fr}.g4{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:1000px){.g2,.g4{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:box-shadow .18s ease,transform .18s ease}
+  .card:hover{box-shadow:0 4px 18px rgba(15,23,42,.06)}
+  .card h2{font-size:12.5px;font-weight:600;color:var(--muted);letter-spacing:.4px;padding:13px 18px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:9px}
+  .card h2 svg{width:15px;height:15px}
+  .stat{padding:16px 18px}
+  .stat small{color:var(--muted);font-size:11.5px;letter-spacing:.4px;display:flex;align-items:center;gap:7px}
+  .stat small svg{width:14px;height:14px}
+  .stat b{font-size:21px;font-weight:650;display:block;margin-top:6px;transition:color .25s}
+  .stat b.good{color:var(--ok)}.stat b.warn{color:var(--warn)}
+  .row{display:flex;align-items:center;gap:12px;padding:11px 18px;border-bottom:1px solid var(--border);transition:background .15s}
+  .row:last-child{border-bottom:none}
+  .row:hover{background:#fafbfe}
+  .row .info{flex:1;min-width:0}
+  .row .info b{font-weight:600;font-size:13.5px;display:block}
+  .row .info span{color:var(--muted);font-size:12px}
+  .row.spec{background:var(--accent-soft)}
+  .row.spec b{color:var(--accent)}
+  .tg{position:relative;width:42px;height:23px;flex:none;cursor:pointer}
+  .tg input{opacity:0;width:0;height:0;position:absolute}
+  .tg em{position:absolute;inset:0;background:#cbd5e1;border-radius:23px;transition:background .18s}
+  .tg em:before{content:"";position:absolute;width:17px;height:17px;border-radius:50%;background:#fff;top:3px;left:3px;transition:transform .18s cubic-bezier(.3,.9,.4,1.2);box-shadow:0 1px 3px rgba(0,0,0,.25)}
+  .tg input:checked + em{background:var(--accent)}
+  .tg input:checked + em:before{transform:translateX(19px)}
+  .tg.lock{opacity:.45;cursor:not-allowed}
+  .notis{max-height:520px;overflow-y:auto}
+  .noti{padding:11px 18px;border-bottom:1px solid var(--border);display:flex;gap:11px;cursor:pointer;transition:background .15s}
+  .noti:last-child{border-bottom:none}
+  .noti:hover{background:#f6f9ff}
+  .noti .ic{flex:none;width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;transition:transform .15s}
+  .noti:hover .ic{transform:scale(1.08)}
+  .noti .ic svg{width:16px;height:16px}
+  .noti.block .ic{background:#fee2e2}.noti.block .ic svg{stroke:var(--bad)}
+  .noti.quar .ic{background:#fef3c7}.noti.quar .ic svg{stroke:var(--warn)}
+  .noti.info .ic{background:var(--accent-soft)}.noti.info .ic svg{stroke:var(--accent)}
+  .noti .b{flex:1;min-width:0}
+  .noti .b b{font-size:13.5px;display:block}
+  .noti .b p{color:var(--muted);font-size:12.5px;word-break:break-all;margin-top:2px}
+  .noti .b small{color:#9ca3af;font-size:11px;display:block;margin-top:3px}
+  .empty{padding:34px;text-align:center;color:var(--muted)}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{color:var(--muted);font-weight:600;text-align:left;padding:10px 18px;border-bottom:1px solid var(--border);background:#fafbfc}
+  td{padding:9px 18px;border-bottom:1px solid var(--border);word-break:break-all}
+  tr:last-child td{border-bottom:none}
+  tbody tr{transition:background .15s}
+  tbody tr:hover{background:#fafbfe}
+  .pill{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:600}
+  .pill.term{background:#fee2e2;color:var(--bad)}
+  .pill.quar{background:#fef3c7;color:var(--warn)}
+  .pill.ok{background:#dcfce7;color:var(--ok)}
+  .pill.exit{background:#e5e7eb;color:var(--muted)}
+  .openbtn{border:1px solid var(--border);background:#fff;border-radius:7px;padding:4px 12px;font-size:12px;cursor:pointer;color:var(--accent);transition:background .15s}
+  .openbtn:hover{background:var(--accent-soft)}
+  .logs{max-height:560px;overflow-y:auto;padding:12px 16px;background:#0f172a;border-radius:0 0 12px 12px}
+  .logs pre{font-family:Consolas,monospace;font-size:11.5px;line-height:1.55;color:#cbd5e1;white-space:pre-wrap;word-break:break-all}
+  .foot{padding:10px 26px;color:#9ca3af;font-size:11px;border-top:1px solid var(--border);margin-top:auto}
+  /* ===== detail modal ===== */
+  .overlay{position:fixed;inset:0;background:rgba(15,23,42,.42);display:none;align-items:center;justify-content:center;z-index:50;animation:fadeIn .18s ease}
+  .overlay.on{display:flex}
+  @keyframes fadeIn{from{opacity:0}to{opacity:1}}
+  .modal{background:var(--panel);border-radius:14px;width:640px;max-width:92vw;max-height:84vh;overflow-y:auto;box-shadow:0 18px 50px rgba(0,0,0,.28);animation:popIn .22s cubic-bezier(.2,.8,.3,1.15)}
+  @keyframes popIn{from{opacity:0;transform:scale(.94) translateY(10px)}to{opacity:1;transform:none}}
+  .modal .mhead{padding:16px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:11px}
+  .modal .mhead .ic{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;flex:none}
+  .modal .mhead .ic svg{width:18px;height:18px}
+  .modal .mhead b{font-size:15px;display:block}
+  .modal .mhead span{color:var(--muted);font-size:12px}
+  .modal .mclose{margin-left:auto;border:none;background:#f1f5f9;border-radius:8px;width:28px;height:28px;cursor:pointer;color:var(--muted);font-size:15px;transition:background .15s}
+  .modal .mclose:hover{background:#e2e8f0}
+  .modal .msec{padding:13px 20px;border-bottom:1px solid var(--border)}
+  .modal .msec:last-child{border-bottom:none}
+  .modal .msec h3{font-size:11.5px;color:var(--muted);letter-spacing:.5px;margin-bottom:7px;font-weight:600}
+  .modal .kv{display:grid;grid-template-columns:96px 1fr;gap:5px 12px;font-size:13px}
+  .modal .kv i{color:var(--muted);font-style:normal}
+  .modal .kv b{font-weight:500;word-break:break-all}
+  .modal .cmd{font-family:Consolas,monospace;font-size:12px;background:#0f172a;color:#cbd5e1;border-radius:9px;padding:11px 13px;word-break:break-all;line-height:1.5}
+  .modal .net-tb{width:100%;border-collapse:collapse;font-size:12px;font-family:Consolas,monospace}
+  .modal .net-tb th{text-align:left;color:var(--muted);padding:6px 10px;border-bottom:1px solid var(--border);font-family:"Segoe UI",sans-serif;font-size:11px;background:#fafbfc}
+  .modal .net-tb td{padding:6px 10px;border-bottom:1px solid var(--border)}
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">
+    <img src="/icon/SevenEndpoint.svg" alt="logo">
+    <div><b>SevenEndpoint</b><small>Security Console</small></div>
+  </div>
+  <nav id="nav">
+    <a data-p="dash" class="on"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>Dashboard</a>
+    <a data-p="notis"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>Notifications</a>
+    <a data-p="inter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/></svg>Interceptions</a>
+    <a data-p="set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</a>
+    <a data-p="chains"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Attack Chains</a>
+    <a data-p="logs"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>Logs</a>
+  </nav>
+  <div class="sidefoot">NewEra Studio<br>Powered by Karlmayer<br>127.0.0.1 only</div>
+</aside>
+<div class="wrap">
+  <topbar><h1 id="pgtitle">Dashboard</h1><div class="conn" id="conn"><i></i><span id="connTxt">Connected</span></div></topbar>
+  <main>
+    <section class="page on" id="p-dash">
+      <div class="grid g4">
+        <div class="card"><div class="stat"><small><svg viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>PROTECTION</small><b class="good" id="st-prot">Active</b></div></div>
+        <div class="card"><div class="stat"><small><svg viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><polyline points="9 14 12 11 15 14"/></svg>REALTIME FILE PROTECT</small><b class="good" id="st-file">Active</b></div></div>
+        <div class="card"><div class="stat"><small><svg viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/></svg>INTERCEPTIONS</small><b id="st-inter">0</b></div></div>
+        <div class="card"><div class="stat"><small><svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>UPTIME</small><b id="st-up">-</b></div></div>
+      </div>
+      <div class="grid g2" style="margin-top:16px">
+        <div class="card"><h2>Recent Notifications</h2><div class="notis" id="dash-notis"><div class="empty">No notifications yet</div></div></div>
+        <div class="card"><h2>Recent Interceptions</h2>
+          <table><thead><tr><th>Time</th><th>Process</th><th>Action</th></tr></thead><tbody id="dash-inter"><tr><td colspan="3" class="empty">No interceptions</td></tr></tbody></table>
+        </div>
+      </div>
+    </section>
+    <section class="page" id="p-notis">
+      <div class="card"><h2>Notifications (latest 200, click for details)</h2><div class="notis" id="notis"><div class="empty">No notifications yet</div></div></div>
+    </section>
+    <section class="page" id="p-inter">
+      <div class="card"><h2>Interception Records (latest 100)</h2>
+        <table><thead><tr><th>Time</th><th>Type</th><th>Process</th><th>Path</th><th>Threat</th><th>Action</th></tr></thead><tbody id="inter"><tr><td colspan="6" class="empty">No interceptions</td></tr></tbody></table>
+      </div>
+    </section>
+    <section class="page" id="p-set">
+      <div class="card"><h2>Settings — changes apply instantly</h2><div id="settings"></div></div>
+    </section>
+    <section class="page" id="p-chains">
+      <div class="card"><h2>Attack Chain Reports (Line/)</h2>
+        <table><thead><tr><th>Report</th><th>Generated</th><th></th></tr></thead><tbody id="chains"><tr><td colspan="3" class="empty">No reports yet</td></tr></tbody></table>
+      </div>
+    </section>
+    <section class="page" id="p-logs">
+      <div class="card"><h2>Runtime Logs (latest 300)</h2><div class="logs"><pre id="logs">Loading...</pre></div></div>
+    </section>
+  </main>
+  <div class="foot">SevenEndpointSecurity · EDR / Endpoint · NewEra Studio · LocalHost Console (127.0.0.1 only)</div>
+</div>
+<!-- notification detail modal -->
+<div class="overlay" id="ovl">
+  <div class="modal">
+    <div class="mhead">
+      <div class="ic" id="m-ic"></div>
+      <div style="flex:1;min-width:0"><b id="m-title">-</b><span id="m-time">-</span></div>
+      <button class="mclose" onclick="closeModal()">✕</button>
+    </div>
+    <div class="msec"><p id="m-body" style="font-size:13.5px;line-height:1.6;word-break:break-all">-</p></div>
+    <div class="msec"><h3>PROCESS</h3>
+      <div class="kv">
+        <i>Process</i><b id="m-name">-</b>
+        <i>PID</i><b id="m-pid">-</b>
+        <i>Path</i><b id="m-path">-</b>
+        <i>Status</i><b id="m-alive">-</b>
+      </div>
+    </div>
+    <div class="msec" id="m-chain-sec" style="display:none"><h3>ATTACK CHAIN</h3><div class="cmd"><a id="m-chain-link" href="#" target="_blank" style="color:#1d4ed8;font-weight:700;font-size:13px">打开攻击链 (View Attack Chain)</a></div></div>
+    <div class="msec"><h3>COMMAND LINE</h3><div class="cmd" id="m-cmd">unavailable</div></div>
+    <div class="msec"><h3>NETWORK CONNECTIONS</h3><div id="m-net"><div class="empty" style="padding:14px">No active connections</div></div></div>
+  </div>
+</div>
+<script>
+const LABELS = {
+  DefenseMode:["Defense Mode","No process scanning/interception — pure active defense + file protection"],
+  high_sensitivity:["High Sensitivity","Lower detection threshold, higher detection rate"],
+  auto_handle:["Auto Handle","Automatically quarantine detected threats"],
+  enhanced_mode:["Enhanced Protection","Enable additional detection engines"],
+  realtime_protect:["Realtime Protection","Realtime filesystem monitoring (always on)",true],
+  process_protect:["Process Protection","Monitor and block malicious process launch"],
+  file_protect:["File Protection","Monitor file create/delete/rename"],
+  file_modify_monitor:["Modify Monitor","Monitor file modification"],
+  cloud_scan:["Cloud Scan","Cloud hash lookup and AI inference"],
+  menu_scan:["Context Menu Scan","Add scan option to file context menu"],
+  etw_telemetry:["Telemetry Intercept","Lightweight behavior telemetry rule intercept"],
+  privacy_enabled:["Privacy","Never report file information"],
+  edr_protect:["EDR Behavior Scoring","Score process file drops and suspicious paths"],
+  dll_sideload_protect:["DLL Sideload Intercept","Block unsigned non-system DLL loading into system processes"]
+};
+const MODEL_OPTIONS = [
+  ["xdows-flash","Xdows Model — Flash"],
+  ["xdows-standard","Xdows Model — Standard"],
+  ["xdows-pro","Xdows Model — Pro"],
+  ["xdows-adaptive","Xdows Model — Adaptive"],
+  ["tanka2","Tanka2-Agent (DEF Project, default)"],
+  ["seven","SevenEngine (legacy)"]
+];
+const TITLES={dash:"Dashboard",notis:"Notifications",inter:"Interceptions",set:"Settings",chains:"Attack Chains",logs:"Logs"};
+let LAST={},CUR='dash';
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+document.getElementById('nav').addEventListener('click',e=>{
+  const a=e.target.closest('a');if(!a)return;
+  CUR=a.dataset.p;
+  document.querySelectorAll('nav a').forEach(x=>x.classList.toggle('on',x===a));
+  document.querySelectorAll('.page').forEach(x=>x.classList.toggle('on',x.id==='p-'+CUR));
+  document.getElementById('pgtitle').textContent=TITLES[CUR];
+});
+function notiClass(t){t=(t||'').toLowerCase();
+  if(t.includes('quarantin'))return 'quar';
+  if(t.includes('block')||t.includes('threat')||t.includes('ransom')||t.includes('intercept')
+)return 'block';
+  return 'info';}
+function notiIcon(c){
+  if(c==='block')return '<svg viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/></svg>';
+  if(c==='quar')return '<svg viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>';
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/></svg>';
+}
+function renderNotis(elId,list){
+  const box=document.getElementById(elId);if(!box)return;
+  const l=(list||[]).slice(0,elId==='notis'?200:5);
+  if(!l.length){box.innerHTML='<div class="empty">No notifications yet</div>';return}
+  box.innerHTML=l.map((n,idx)=>{
+    const c=notiClass(n.title);
+    return '<div class="noti" onclick="openDetail('+idx+')"><div class="ic">'+notiIcon(c)+'</div><div class="b"><b>'+esc(n.title)+'</b><p>'+esc(n.body)+'</p>'
+      +(n.name?'<small>Process: '+esc(n.name)+(n.pid?' · PID '+esc(n.pid):'')+(n.path?' · '+esc(n.path):'')+'</small>':'')
+      +'<small>'+esc(n.time)+'</small></div></div>';
+  }).join('');
+}
+let notiCache=[];
+function cacheNotis(list){notiCache=(list||[]).slice()}
+function renderInter(list,elId,compact){
+  const tb=document.getElementById(elId);if(!tb)return;
+  const l=(list||[]).slice(0,compact?5:100);
+  if(!l.length){tb.innerHTML='<tr><td colspan="'+(compact?3:6)+'" class="empty">No interceptions</td></tr>';return}
+  tb.innerHTML=l.map(r=>{
+    const act=(r.action||'').toLowerCase().includes('quar')?'<span class="pill quar">Quarantined</span>':'<span class="pill term">Terminated</span>';
+    if(compact)return '<tr><td>'+esc(r.time_str)+'</td><td>'+esc(r.name)+'</td><td>'+act+'</td></tr>';
+    return '<tr><td>'+esc(r.time_str)+'</td><td>'+esc(r.type)+'</td><td>'+esc(r.name)+'</td><td>'+esc(r.path)+'</td><td>'+esc(r.threat_type)+(r.confidence?' ('+r.confidence+')':'')+'</td><td>'+act+'</td></tr>';
+  }).join('');
+}
+function renderSettings(s){
+  const box=document.getElementById('settings');
+  const selOpt=(MODEL_OPTIONS.find(o=>o[0]===s.scan_model)||MODEL_OPTIONS[0]);
+  let html='<div class="row spec"><div class="info"><b>Scan Model</b><span>Xdows Model 调用器 By Shiyi — switching kills the old worker, next scan spawns the new one</span></div>'
+    +'<select id="modelSel" style="background:#fff;border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;color:var(--text);cursor:pointer;outline:none;max-width:230px">'
+    +MODEL_OPTIONS.map(o=>'<option value="'+o[0]+'"'+(o[0]===s.scan_model?' selected':'')+'>'+esc(o[1])+'</option>').join('')
+    +'</select></div>';
+  const keys=Object.keys(LABELS).filter(k=>k in s).concat(Object.keys(s).filter(k=>!(k in LABELS)&&typeof s[k]==='boolean'));
+  html+=keys.map(k=>{
+    const meta=LABELS[k]||[k,''];
+    const forced=meta[2]===true;
+    const on=!!s[k];
+    return '<div class="row"><div class="info"><b>'+esc(meta[0])+'</b><span>'+esc(meta[1]||'')+'</span></div>'
+      +'<label class="tg'+(forced?' lock':'')+'"><input type="checkbox" data-k="'+esc(k)+'" '+(on?'checked':'')+' '+(forced?'disabled':'')+'><em></em></label></div>';
+  }).join('');
+  box.innerHTML=html;
+  const sel=document.getElementById('modelSel');
+  sel.addEventListener('change',async()=>{
+    const v=sel.value;
+    try{
+      const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({scan_model:v})});
+      const j=await r.json();
+      if(!j.ok)sel.value=s.scan_model;
+    }catch(e){sel.value=s.scan_model}
+    load();
+  });
+  box.querySelectorAll('input[type=checkbox]').forEach(el=>{
+    el.addEventListener('change',async()=>{
+      const k=el.dataset.k,v=el.checked;
+      try{
+        const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({[k]:v})});
+        const j=await r.json();
+        if(!j.ok||j.applied[k]!==v)el.checked=!v;
+      }catch(e){el.checked=!v}
+      load();
+    });
+  });
+}
+function fmtUp(s){s=Math.max(0,s|0);const h=(s/3600)|0,m=((s%3600)/60)|0;return h?h+'h '+m+'m':(m?m+'m ':'')+(s%60)+'s'}
+/* ===== detail modal ===== */
+async function openDetail(idx){
+  const n=notiCache[idx];if(!n)return;
+  const ovl=document.getElementById('ovl');
+  const c=notiClass(n.title);
+  const ic=document.getElementById('m-ic');
+  ic.className='ic '+c;
+  ic.style.background=c==='block'?'#fee2e2':(c==='quar'?'#fef3c7':'#eff4ff');
+  ic.innerHTML=notiIcon(c);
+  document.getElementById('m-title').textContent=n.title||'-';
+  document.getElementById('m-time').textContent=n.time||'';
+  document.getElementById('m-body').textContent=n.body||'-';
+  document.getElementById('m-name').textContent=n.name||'-';
+  document.getElementById('m-pid').textContent=n.pid||'-';
+  document.getElementById('m-path').textContent=n.path||'-';
+  document.getElementById('m-alive').innerHTML='<span class="pill ok">checking…</span>';
+  document.getElementById('m-cmd').textContent='loading…';
+  document.getElementById('m-net').innerHTML='<div class="empty" style="padding:14px">loading…</div>';
+  ovl.classList.add('on');
+  // 攻击链: 该通知关联 PID 有溯源报告则显示"打开攻击链"
+  const csec=document.getElementById('m-chain-sec'),clink=document.getElementById('m-chain-link');
+  csec.style.display='none';
+  if(n.pid){fetch('/api/chains?pid='+encodeURIComponent(n.pid)).then(r=>r.json()).then(j=>{
+    if(j.ok&&j.chains&&j.chains.length){clink.href='/line/'+encodeURIComponent(j.chains[0].file);
+      clink.textContent='打开攻击链 (generated '+j.chains[0].mtime+')';csec.style.display='block';}}).catch(()=>{})}
+  const pid=n.pid||0;
+  if(!pid){document.getElementById('m-alive').innerHTML='<span class="pill exit">No PID</span>';document.getElementById('m-cmd').textContent='unavailable';return}
+  try{
+    const r=await fetch('/api/proc?pid='+encodeURIComponent(pid));
+    const p=await r.json();
+    document.getElementById('m-alive').innerHTML=p.alive?'<span class="pill ok">Running</span>':'<span class="pill exit">Exited</span>';
+    if(!document.getElementById('m-name').textContent||document.getElementById('m-name').textContent==='-'){document.getElementById('m-name').textContent=p.name||'-'}
+    if((!document.getElementById('m-path').textContent||document.getElementById('m-path').textContent==='-')&&p.path){document.getElementById('m-path').textContent=p.path}
+    document.getElementById('m-cmd').textContent=p.cmdline||'unavailable (no access or process exited)';
+    if(p.net&&p.net.length){
+      document.getElementById('m-net').innerHTML='<table class="net-tb"><thead><tr><th>Proto</th><th>Local</th><th>Remote</th><th>State</th></tr></thead><tbody>'
+        +p.net.map(x=>'<tr><td>'+esc(x.proto)+'</td><td>'+esc(x.local)+'</td><td>'+esc(x.remote)+'</td><td>'+esc(x.state)+'</td></tr>').join('')+'</tbody></table>';
+    }else{
+      document.getElementById('m-net').innerHTML='<div class="empty" style="padding:14px">No active connections</div>';
+    }
+  }catch(e){
+    document.getElementById('m-alive').innerHTML='<span class="pill exit">Query failed</span>';
+    document.getElementById('m-cmd').textContent='unavailable';
+  }
+}
+function closeModal(){document.getElementById('ovl').classList.remove('on')}
+document.getElementById('ovl').addEventListener('click',e=>{if(e.target===document.getElementById('ovl'))closeModal()});
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+async function load(){
+  try{
+    const r=await fetch('/api/state');const j=await r.json();
+    document.getElementById('conn').classList.remove('off');
+    document.getElementById('connTxt').textContent='Connected';
+    if(JSON.stringify(j.settings)!==JSON.stringify(LAST)){LAST=j.settings;renderSettings(j.settings)}
+    cacheNotis(j.notifications);
+    renderNotis('notis',j.notifications);renderNotis('dash-notis',j.notifications);
+    renderInter(j.interceptions,'inter',false);renderInter(j.interceptions,'dash-inter',true);
+    const st=j.stats||{};
+    document.getElementById('st-inter').textContent=st.interception_count||0;
+    document.getElementById('st-up').textContent=fmtUp(st.uptime_sec||0);
+    const ch=j.chains||[];
+    const tb=document.getElementById('chains');
+    tb.innerHTML=ch.length?ch.map(c=>'<tr><td>'+esc(c.file)+'</td><td>'+esc(c.mtime)+'</td><td><button class="openbtn" onclick="window.open(\'/chain/'+encodeURIComponent(c.file)+'\',\'_blank\')">Open</button></td></tr>').join('')
+      :'<tr><td colspan="3" class="empty">No reports yet</td></tr>';
+    document.getElementById('logs').textContent=(j.logs||[]).join('\n')||'No logs';
+  }catch(e){
+    document.getElementById('conn').classList.add('off');
+    document.getElementById('connTxt').textContent='Disconnected';
+  }
+}
+load();
+setInterval(load,1500);
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "rules": [
+    {
+      "name": "IOA-4 对抗防御+持久化",
+      "signals": [["av_tamper", null], ["persistence", "\\\\run|service|schtasks"]],
+      "window": 900,
+      "points": 25,
+      "enabled": true
+    }
+  ]
+}
