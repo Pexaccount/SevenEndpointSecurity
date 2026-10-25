@@ -45,8 +45,10 @@
 其中的扫描引擎和数据若有不足也请汇报；或者有更好的选择，可以告诉我们！
 
 - QQ 群聊：`777353898`
-- BiliBili：`Karlmayer`
-- 所属工作室：新启年工作室（NewEra - NES）
+- 个人BiliBili：`Karlmayer`
+- 所属工作室：`新启年工作室（NewEra - NES）`
 - 工作室网页：[NewEra](https://www.newera2625.top/)
+- 工作室群聊：`757186133`
+- 个人邮箱：`pextechnology@qq.com`
 
 ——感谢使用
