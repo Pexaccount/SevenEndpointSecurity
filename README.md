@@ -12,6 +12,7 @@
 - 若您的计算机可正常加载驱动（发行版本），那么 [Kvc](https://github.com/wesmar/kvc) 驱动可以成功加载，程序主进程可以获得 PPL（稳定）。
 - 托盘右键可以打开控制台来查看详细信息
 - 控制台中可打开详细被拦截的威胁的操作链（拓补链）可大致还原程序行为
+- 若您需要让您的AI工具或您来修改代码，可以参考文档[Docs](https://github.com/Pexaccount/SevenEndpointSecurity/tree/main/docs)
 
 ---
 
