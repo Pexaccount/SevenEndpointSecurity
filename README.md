@@ -55,6 +55,7 @@
 
 - SevenEndpoint官方QQ群聊：[群聊](https://qm.qq.com/q/5PTqeSIfhm)
 - 个人BiliBili：`Karlmayer`
+- 工作室Bilibili：`新启年工作室-NES`
 - 所属工作室：`新启年工作室（NewEraStudio - NES）`
 - 工作室网页：[NewEra](https://www.newera2625.top/)
 - 工作室群聊：[群聊](https://qm.qq.com/q/FcNEgTxFtK)
