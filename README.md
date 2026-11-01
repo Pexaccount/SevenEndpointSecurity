@@ -41,7 +41,7 @@
 ## 鸣谢
 
 - 致谢：WinDF-NES 、 Shiyi、QBZ-191
-- WinDF（NES室长，QQ:3293269439）为SevenEndpoint提供了WinUI3控制台的Frok版本，并提供了正式、实验性和预览三个更新通道
+- WinDF（NES室长，QQ:3293269439）为SevenEndpoint提供了WinUI3控制台的Frok版本（暂未上线），并提供了正式、实验性和预览三个更新通道
 - Shiyi（Xdows作者，QQ:2966643247）为SevenEndpoint提供了Xdows的全系列引擎
 - QBZ-191（Tanka引擎作者，QQ:3862067059）为SevenEndpoint提供了Tanka2Agent
 
