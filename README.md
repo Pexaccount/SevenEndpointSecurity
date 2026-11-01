@@ -30,9 +30,9 @@
 
 ---
 
-## SevenEngine V2 Flash Preview
+## SevenEngine V3
 
-- 误报降低
+- 重构为1028维的LightGBM引擎
 - 新增了两个自制杀毒软件的反病毒引擎（Xdows & Tanka2）
 致谢`XdowsSecurity`和`DEF（Tanka）`要是有白文件，也可以发送至 `pextechnology@qq.com`
 
