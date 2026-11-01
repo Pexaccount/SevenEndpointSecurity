@@ -38,15 +38,24 @@
 
 ---
 
+## 鸣谢
+
+- 致谢：WinDF-NES 、 Shiyi、QBZ-191
+- WinDF（NES室长，QQ:3293269439）为SevenEndpoint提供了WinUI3控制台的Frok版本，并提供了正式、实验性和预览三个更新通道
+- Shiyi（Xdows作者，QQ:2966643247）为SevenEndpoint提供了Xdows的全系列引擎
+- QBZ-191（Tanka引擎作者，QQ:3862067059）为SevenEndpoint提供了Tanka2Agent
+
+---
+
 ## 反馈与联系
 
-若您遇到问题，请向 `pextechnology@qq.com` 汇报，也可以发送误报文件。
+若您遇到问题，请向邮箱 `pextechnology@qq.com` 汇报，也可以发送误报文件。
 
 其中的扫描引擎和数据若有不足也请汇报；或者有更好的选择，可以告诉我们！
 
-- QQ 群聊：[群聊](https://qm.qq.com/q/5PTqeSIfhm)
+- SevenEndpoint官方QQ群聊：[群聊](https://qm.qq.com/q/5PTqeSIfhm)
 - 个人BiliBili：`Karlmayer`
-- 所属工作室：`新启年工作室（NewEra - NES）`
+- 所属工作室：`新启年工作室（NewEraStudio - NES）`
 - 工作室网页：[NewEra](https://www.newera2625.top/)
 - 工作室群聊：[群聊](https://qm.qq.com/q/FcNEgTxFtK)
 - 个人邮箱：`pextechnology@qq.com`
