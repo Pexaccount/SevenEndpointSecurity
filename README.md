@@ -4,8 +4,7 @@
 - 详细阅读以下内容来获得稳定且安全的使用体验
 - **在控制台 > 设置"中开启DefenseMode来关闭进程防护，获得最低误报且最稳定的模式（适合日用）**
 - 无UI Endpoint，EDR & EPP架构。
-- 移除了ETW遥测，因为Worker同时处理30万条ETW事件，崩溃了。
-- ETW处理还是需要Rust、C++、C这样的语言，Python踩坑了，因为成功接上ETW就花了我一周。
+- ETW重新在C语言的SevenAgent启用。
 - 软件拦截并非删除，防止资料被误删。
 - 规则打磨了很久，主动防御误报很低。
 - 引擎误报问题会一点点减少，请谅解；因为是v0.0.3，也打磨了很多个月。
@@ -13,18 +12,19 @@
 - 托盘右键可以打开控制台来查看详细信息
 - 控制台中可打开详细被拦截的威胁的操作链（拓补链）可大致还原程序行为
 - 若您需要让您的AI工具或您来修改代码，可以参考文档[Docs](https://github.com/Pexaccount/SevenEndpointSecurity/tree/main/docs)
+- [SevenEngine云鉴定](https://sevenengine-cloud.onrender.com/)
 
 ---
 
 ## 架构说明
 
-由Python编写，用户态杀毒软件，未使用不稳定的驱动内核。
+由Python和C语言编写，用户态杀毒软件，未使用不稳定的驱动内核。
 本杀毒软件的拦截构建分为 **EDR** 和 **Endpoint**，虽然不能和 PYAS、XIGUASecurity 对标。
 
 - 动态分析和静态拦截
 - 加入ABD感染保护
 - 加入Behavior EDR
-- 单 EDR 架构为初版时使用  
+- 加入了C语言的SevenAgent行为保护和更多规则，ETW事件流
   （此开源版本为最新上传的版本，但“最新上传不等于最新”；旧版已被遗弃、删除）
 - 由于代码维护性太差（屎山），可以用拆分器把模块拆开查看
 
@@ -32,7 +32,7 @@
 
 ## SevenEngine V3
 
-- 重构为1028维的LightGBM引擎
+- 重构为940维的LightGBM引擎
 - 新增了两个自制杀毒软件的反病毒引擎（Xdows & Tanka2）
 致谢`XdowsSecurity`和`DEF（Tanka）`要是有白文件，也可以发送至 `pextechnology@qq.com`
 
@@ -40,7 +40,8 @@
 
 ## 鸣谢
 
-- 致谢：WinDF-NES 、 Shiyi、QBZ-191
+- 致谢：WinDF-NES 、 Shiyi、QBZ-191、MEMZUAC
+- MEMZUAC（西瓜杀毒作者，QQ:3118296183）为SevenEndpoint提供了上百条行为规则
 - WinDF（NES室长，QQ:3293269439）为SevenEndpoint提供了WinUI3控制台版本的Frok（暂未上线），并提供了正式、实验性和预览三个更新通道
 - Shiyi（Xdows作者，QQ:2966643247）为SevenEndpoint提供了Xdows的全系列引擎
 - QBZ-191（Tanka引擎作者，QQ:3862067059）为SevenEndpoint提供了Tanka2Agent
