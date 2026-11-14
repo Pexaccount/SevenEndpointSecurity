@@ -1,0 +1,183 @@
+
+# ===== SevenAgent isolated ETW host (single-file integration) =====
+class _SevenAgentHost:
+    PIPE = r"\\.\pipe\SevenAgentIPC"
+    def __init__(self, parent):
+        self.parent = parent
+        self.proc = None
+        self.job = None
+        self.pipe = None
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._serve, name='SevenAgentPipeHost', daemon=True)
+
+    def start(self):
+        if not self.thread.is_alive():
+            self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        try:
+            if self.pipe:
+                ctypes.windll.kernel32.CancelIoEx(self.pipe, None)
+                ctypes.windll.kernel32.CloseHandle(self.pipe)
+                self.pipe = None
+        except Exception:
+            pass
+        try:
+            if self.job:
+                ctypes.windll.kernel32.CloseHandle(self.job)
+                self.job = None
+        except Exception:
+            pass
+
+    def _create_pipe(self):
+        k = ctypes.windll.kernel32
+        k.CreateNamedPipeW.restype = ctypes.c_void_p
+        h = k.CreateNamedPipeW(self.PIPE, 0x00000001, 0, 1, 4096, 4096, 1000, None)
+        if h == ctypes.c_void_p(-1).value:
+            raise OSError(ctypes.get_last_error(), 'CreateNamedPipeW')
+        self.pipe = h
+        return h
+
+    def _start_agent(self):
+        path = os.path.join(BASE_DIR, 'SevenAgent', 'SevenAgent.exe')
+        rules = os.path.join(BASE_DIR, 'SevenAgent', 'agent_rules.json')
+        good = 0
+        bad = 0
+        try:
+            with open(rules, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for r in data.get('rules', []):
+                if isinstance(r, dict) and r.get('id') and r.get('kind') == 'ImageLoad' and r.get('action') == 'report_high_confidence':
+                    good += 1
+                else:
+                    bad += 1
+            if not isinstance(data.get('rules'), list):
+                bad += 1
+        except Exception as e:
+            bad += 1
+            _log('[SevenAgent] rules load error: {}'.format(e))
+        _log('[SevenAgent] rules loaded={} abnormal={}'.format(good, bad))
+        if not os.path.isfile(path):
+            _log('[SevenAgent] startup failed: SevenAgent.exe missing')
+            return False
+        env = dict(os.environ)
+        env['SEVEN_PARENT_PID'] = str(os.getpid())
+        env['SEVEN_AGENT_RULES'] = rules
+        try:
+            self.proc = subprocess.Popen([path, '--Agent'], cwd=os.path.dirname(path), env=env,
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.DEVNULL,
+                                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            k = ctypes.windll.kernel32
+            self.job = k.CreateJobObjectW(None, None)
+            class _BASIC(ctypes.Structure):
+                _fields_ = [('PerProcessUserTimeLimit', ctypes.c_longlong), ('PerJobUserTimeLimit', ctypes.c_longlong),
+                            ('LimitFlags', wintypes.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t),
+                            ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wintypes.DWORD),
+                            ('Affinity', ctypes.c_size_t), ('PriorityClass', wintypes.DWORD), ('SchedulingClass', wintypes.DWORD)]
+            class _IO(ctypes.Structure):
+                _fields_ = [(x, ctypes.c_ulonglong) for x in ('ReadOperationCount','WriteOperationCount','OtherOperationCount','ReadTransferCount','WriteTransferCount','OtherTransferCount')]
+            class _EXT(ctypes.Structure):
+                _fields_ = [('BasicLimitInformation', _BASIC), ('IoInfo', _IO), ('ProcessMemoryLimit', ctypes.c_size_t),
+                            ('JobMemoryLimit', ctypes.c_size_t), ('PeakProcessMemoryUsed', ctypes.c_size_t), ('PeakJobMemoryUsed', ctypes.c_size_t)]
+            lim = _EXT(); lim.BasicLimitInformation.LimitFlags = 0x2000
+            if not k.SetInformationJobObject(self.job, 9, ctypes.byref(lim), ctypes.sizeof(lim)):
+                raise OSError(ctypes.get_last_error(), 'SetInformationJobObject')
+            if not k.AssignProcessToJobObject(self.job, wintypes.HANDLE(int(self.proc._handle))):
+                raise OSError(ctypes.get_last_error(), 'AssignProcessToJobObject')
+            try:
+                ppl = bool(_ppl_protect_pid(self.proc.pid))
+            except Exception as e:
+                ppl = False
+                _log('[SevenAgent] PPL exception: {}'.format(e))
+            _log('[SevenAgent] started={} pid={} PPL={}'.format(self.proc.poll() is None, self.proc.pid, 'OK' if ppl else 'FAILED'))
+            return True
+        except Exception as e:
+            _log('[SevenAgent] startup failed: {}'.format(e))
+            return False
+
+    def _serve(self):
+        k = ctypes.windll.kernel32
+        while not self.stop_event.is_set():
+            try:
+                h = self._create_pipe()
+                if not self.proc or self.proc.poll() is not None:
+                    if self.proc:
+                        _log('[SevenAgent] exited rc={}; restarting'.format(self.proc.returncode))
+                    if not self._start_agent():
+                        time.sleep(2)
+                        continue
+                ok = k.ConnectNamedPipe(h, None)
+                if not ok and ctypes.get_last_error() != 535:
+                    raise OSError(ctypes.get_last_error(), 'ConnectNamedPipe')
+                pending = b''
+                buf = ctypes.create_string_buffer(4096)
+                while not self.stop_event.is_set():
+                    n = wintypes.DWORD()
+                    if not k.ReadFile(h, buf, len(buf), ctypes.byref(n), None) or not n.value:
+                        break
+                    pending += buf.raw[:n.value]
+                    while b'\n' in pending:
+                        line, pending = pending.split(b'\n', 1)
+                        self._message(line)
+                k.DisconnectNamedPipe(h); k.CloseHandle(h); self.pipe = None
+            except Exception as e:
+                if not self.stop_event.is_set():
+                    _log('[SevenAgent] IPC abnormal: {}'.format(e))
+                time.sleep(1)
+
+    def _message(self, raw):
+        try:
+            m = json.loads(raw.decode('ascii', 'strict'))
+            pid = int(m.get('pid', 0)); module = str(m.get('module', ''))
+            rule = str(m.get('rule', '')); behavior = str(m.get('behavior', ''))
+            family = str(m.get('family', 'Generic'))
+            if pid <= 0 or rule != 'Agent.HighConfidence.SideloadChain': raise ValueError('rule/PID rejected')
+            if behavior != 'ImageLoad.SensitiveDll.UserWritablePath': raise ValueError('behavior rejected')
+            if not self._eligible(pid, module): raise ValueError('mutual exemption or path policy')
+            path = self._image(pid)
+            reason = 'MainGuard:Behavior.SuspiciousSideload.' + (family if family in ('SilverFox','Generic') else 'Generic')
+            rm = getattr(self.parent, '_realtime_monitor', None)
+            chain = rm._terminate_chain(pid, os.path.basename(path), path, full=True) if rm else []
+            _log('[SevenAgent][ETW][BLOCK] {} PID={} module={} chain={}'.format(reason, pid, module, len(chain)))
+            _record_interception('MainGuard:Behavior', os.path.basename(path), path, threat_type=reason,
+                                 confidence=95, engine='SevenAgent-ETW',
+                                 action='terminated' if chain else 'reported',
+                                 extra='rule={} behavior={} family={} module={} PID:{}'.format(rule, behavior, family, module, pid))
+            _edr_add_event(pid, os.path.basename(path), path, 'ioa', 25, reason + ' ' + behavior)
+            _edr_report_chain(pid, os.path.basename(path), path, [(reason, 25), (behavior, 0)],
+                              action='terminated' if chain else 'reported')
+        except Exception as e:
+            _log('[SevenAgent][REJECT] {}'.format(e))
+
+    @staticmethod
+    def _image(pid):
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not h: return ''
+        b = ctypes.create_unicode_buffer(32768); n = wintypes.DWORD(len(b))
+        try:
+            return b.value if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, b, ctypes.byref(n)) else ''
+        finally: ctypes.windll.kernel32.CloseHandle(h)
+
+    @classmethod
+    def _eligible(cls, pid, module):
+        host = cls._image(pid)
+        h = os.path.normcase(host); m = os.path.normcase(module)
+        if ('\\sevenagent\\' in h or '\\sevenendpointsecurity\\' in h or h.endswith('\\sevenendpoint.exe')): return False
+        if not any(x in m for x in ('\\appdata\\','\\temp\\','\\downloads\\','\\users\\public\\','\\programdata\\')): return False
+        if os.path.basename(m).lower() not in {'version.dll','winmm.dll','dbghelp.dll','dxgi.dll','d3d9.dll','d3d11.dll','winhttp.dll','wintrust.dll','usp10.dll'}: return False
+        return os.path.basename(h).lower() in {'rundll32.exe','regsvr32.exe','mshta.exe','installutil.exe','control.exe'}
+
+_g_seven_agent = None
+
+def _start_seven_agent(parent):
+    global _g_seven_agent
+    if _g_seven_agent is None:
+        _g_seven_agent = _SevenAgentHost(parent)
+    _g_seven_agent.start()
+
+def _stop_seven_agent():
+    if _g_seven_agent is not None:
+        _g_seven_agent.stop()
+# ===== end SevenAgent host =====

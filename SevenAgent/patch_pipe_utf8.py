@@ -1,0 +1,7 @@
+from pathlib import Path
+p=Path(__file__).with_name('SevenAgent.c')
+s=p.read_text(encoding='utf-8')
+old='static void send_alert(DWORD pid,const WCHAR*module){char msg[2048];DWORD n;if(g_pipe_handle==INVALID_HANDLE_VALUE&&!pipe_connect())return;_snprintf(msg,sizeof(msg),"{\\\"pid\\\":%lu,\\\"rule\\\":\\\"Agent.HighConfidence.SideloadChain\\\",\\\"behavior\\\":\\\"ImageLoad.SensitiveDll.UserWritablePath\\\",\\\"family\\\":\\\"SilverFox\\\",\\\"module\\\":\\\"%S\\\"}\\n",(unsigned long)pid,module);if(!WriteFile(g_pipe_handle,msg,(DWORD)strlen(msg),&n,NULL)){CloseHandle(g_pipe_handle);g_pipe_handle=INVALID_HANDLE_VALUE;}}'
+new='''static void send_alert(DWORD pid,const WCHAR*module){char msg[4096],esc[2048];DWORD n,i=0,j=0;WCHAR c;if(g_pipe_handle==INVALID_HANDLE_VALUE&&!pipe_connect())return;while(module[i]&&j+6<sizeof(esc)){c=module[i++];if(c==L'\\\\'||c==L'\"'){esc[j++]='\\\\';esc[j++]=(char)c;}else if(c<0x20||c>0x7e){_snprintf(esc+j,7,"\\\\u%04x",(unsigned)c);j+=6;}else esc[j++]=(char)c;}esc[j]=0;_snprintf(msg,sizeof(msg),"{\\\"pid\\\":%lu,\\\"rule\\\":\\\"Agent.HighConfidence.SideloadChain\\\",\\\"behavior\\\":\\\"ImageLoad.SensitiveDll.UserWritablePath\\\",\\\"family\\\":\\\"SilverFox\\\",\\\"module\\\":\\\"%s\\\"}\\n",(unsigned long)pid,esc);if(!WriteFile(g_pipe_handle,msg,(DWORD)strlen(msg),&n,NULL)){CloseHandle(g_pipe_handle);g_pipe_handle=INVALID_HANDLE_VALUE;}}'''
+if s.count(old)!=1: raise SystemExit(f'send_alert fragment count {s.count(old)}')
+p.write_text(s.replace(old,new,1),encoding='utf-8',newline='')

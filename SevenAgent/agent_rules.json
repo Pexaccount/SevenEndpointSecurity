@@ -1,0 +1,1744 @@
+{
+ "version": 2,
+ "_doc": "SevenAgent rules v2 - v1 SideloadChain kept verbatim (old syntax compatible). New kinds: ProcessCmdline (pattern+context AND matching on uppercased kernel process-start cmdline, extracted 2026-11 from SigmaHQ-sourced AVBehaviorTrack.c 239 rules + XIGUASecurity/Melix composite strings). weak rules never alert alone - combo fuel only. combo: score>=threshold AND >=min_types distinct behavior types within window_seconds triggers terminate; suspect combo (score>=suspect_threshold AND >=suspect_min_types) reports only. module-load combo: sensitive DLL in user-writable path = type UserModuleLoad score 20. FP traps carried over: taskkill only /IM (never /pid numeric trap), Run/RunOnce downgraded to weak, netstop/scstop require service-name context.",
+ "rules": [
+  {
+   "id": "Agent.HighConfidence.SideloadChain",
+   "kind": "ImageLoad",
+   "family": "SilverFox",
+   "behavior": "ImageLoad.SuspiciousSideload",
+   "dll_names": [
+    "version.dll",
+    "winmm.dll",
+    "dbghelp.dll",
+    "dxgi.dll",
+    "d3d9.dll",
+    "d3d11.dll",
+    "winhttp.dll",
+    "wintrust.dll",
+    "usp10.dll"
+   ],
+   "require_user_writable_path": true,
+   "require_sensitive_host": true,
+   "require_two_distinct_modules": true,
+   "window_seconds": 30,
+   "action": "report_high_confidence"
+  },
+  {
+   "id": "Agent.Cmdline.Malicious",
+   "kind": "ProcessCmdline",
+   "level": "malicious",
+   "score": 100,
+   "family": "Multi",
+   "behavior": "ProcessCmdline.TTP.High",
+   "patterns": [
+    {
+     "match": "NET STOP WINDEFEND",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Stop Windows Defender service"
+    },
+    {
+     "match": "SC STOP WINDEFEND",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Stop Windows Defender via sc"
+    },
+    {
+     "match": "SC CONFIG WINDEFEND",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Modify Windows Defender service"
+    },
+    {
+     "match": "NET STOP MSSECSVC",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Stop Defender security service"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Windows Defender process",
+     "context": "/IM WINDEFEND"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Defender engine process",
+     "context": "/IM MSMPENG"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill 360 security process",
+     "context": "/IM 360"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Huorong security process",
+     "context": "/IM HIPS"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Huorong security process",
+     "context": "/IM HUORONG"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Huorong HipsTray process",
+     "context": "/IM HIPSTRAY"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Huorong HipsDaemon process",
+     "context": "/IM HIPSDAEMON"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Huorong WSctrl process",
+     "context": "/IM WSCTRL"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Tencent PC Manager process",
+     "context": "/IM QQP"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Kingsoft security tray",
+     "context": "/IM KXETRAY"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Kingsoft security process",
+     "context": "/IM KSAFE"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill ESET security process",
+     "context": "/IM ESET"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill ESET service process",
+     "context": "/IM EKRN"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Bitdefender process",
+     "context": "/IM BDAGENT"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Bitdefender service",
+     "context": "/IM VSSERV"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Symantec security process",
+     "context": "/IM RTVSCAN"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill McAfee security process",
+     "context": "/IM MCAFEE"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Avast process",
+     "context": "/IM AVAST"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill Kaspersky process",
+     "context": "/IM AVP"
+    },
+    {
+     "match": "TASKKILL",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Kill XIGUASecurity process",
+     "context": "/IM XIGUASECURITY"
+    },
+    {
+     "match": "FLTMC",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Unload file-system filter (anti-AV)",
+     "context": "UNLOAD"
+    },
+    {
+     "match": "NET STOP",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Stop Windows Defender service",
+     "context": "WINDEFEND"
+    },
+    {
+     "match": "NET STOP",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Stop Huorong security service",
+     "context": "HUORONG"
+    },
+    {
+     "match": "SC STOP",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Stop Windows Defender via sc",
+     "context": "WINDEFEND"
+    },
+    {
+     "match": "SC DELETE",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Delete Windows Defender service",
+     "context": "WINDEFEND"
+    },
+    {
+     "match": "SC DELETE",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Delete Huorong security service",
+     "context": "HUORONG"
+    },
+    {
+     "match": "VSSADMIN",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Delete volume shadow copies (ransomware)",
+     "context": "DELETE"
+    },
+    {
+     "match": "VSSADMIN",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Shrink shadow storage (ransomware)",
+     "context": "RESIZE"
+    },
+    {
+     "match": "DELETE SHADOWS",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Delete shadow copies (ransomware)"
+    },
+    {
+     "match": "SHADOWCOPY DELETE",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Delete shadow copy via WMI (ransomware)"
+    },
+    {
+     "match": "DISKSHADOW",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "DiskShadow scripting (ransomware prep)"
+    },
+    {
+     "match": "WBADMIN",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Delete backup catalog (ransomware)",
+     "context": "DELETE"
+    },
+    {
+     "match": "WBADMIN",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Stop backup job (ransomware)",
+     "context": "STOPJOB"
+    },
+    {
+     "match": "BCDEDIT",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Disable recovery environment (ransomware)",
+     "context": "RECOVERYENABLED"
+    },
+    {
+     "match": "BCDEDIT",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Hide boot failures (ransomware)",
+     "context": "BOOTSTATUSPOLICY"
+    },
+    {
+     "match": "BCDEDIT",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Force safe-boot (ransomware)",
+     "context": "SAFEBOOT"
+    },
+    {
+     "match": "REAGENTC",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Disable Windows Recovery (ransomware)",
+     "context": "/DISABLE"
+    },
+    {
+     "match": "DISABLE-COMPUTERESTORE",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Disable System Restore (ransomware)"
+    },
+    {
+     "match": "WEVTUTIL",
+     "type": "ShadowKill",
+     "mitre": "T1070",
+     "note": "Clear event logs (anti-forensics)",
+     "context": "CL"
+    },
+    {
+     "match": "CIPHER",
+     "type": "ShadowKill",
+     "mitre": "T1070",
+     "note": "Wipe free space via cipher (destructive)",
+     "context": "/W"
+    },
+    {
+     "match": "FSUTIL",
+     "type": "ShadowKill",
+     "mitre": "T1070",
+     "note": "Delete USN journal (anti-forensics)",
+     "context": "DELETEJOURNAL"
+    },
+    {
+     "match": "FORMAT",
+     "type": "ShadowKill",
+     "mitre": "T1485",
+     "note": "Format system drive (destructive)",
+     "context": "C:"
+    },
+    {
+     "match": "DISKPART",
+     "type": "ShadowKill",
+     "mitre": "T1485",
+     "note": "Wipe disk via diskpart clean",
+     "context": "CLEAN"
+    },
+    {
+     "match": "SCHTASKS",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Scheduled task tampering Defender exclusion",
+     "context": "EXCLUSION"
+    },
+    {
+     "match": "REG ADD",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "reg add Defender exclusion path",
+     "context": "WINDOWS DEFENDER\\EXCLUSIONS"
+    },
+    {
+     "match": "NETSH",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "netsh disable firewall profiles",
+     "context": "SET ALLOFF"
+    },
+    {
+     "match": "ADD-MPPREFERENCE",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Add Defender exclusion via PowerShell",
+     "context": "EXCLUSION"
+    },
+    {
+     "match": "SET-MPPREFERENCE",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable Defender via PowerShell",
+     "context": "DISABLE"
+    },
+    {
+     "match": "MPPREFERENCE",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Modify Defender preferences",
+     "context": "EXCLUSION"
+    },
+    {
+     "match": "-EXCLUSIONPATH",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Add Defender exclusion path",
+     "context": "MPPREFERENCE"
+    },
+    {
+     "match": "-EXCLUSIONPROCESS",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Add Defender exclusion process",
+     "context": "MPPREFERENCE"
+    },
+    {
+     "match": "-EXCLUSIONEXTENSION",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Add Defender exclusion extension",
+     "context": "MPPREFERENCE"
+    },
+    {
+     "match": "DISABLEANTISPYWARE",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable Defender antispyware"
+    },
+    {
+     "match": "DISABLEREALTIMEMONITORING",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable Defender real-time protection"
+    },
+    {
+     "match": "DISABLEBEHAVIORMONITORING",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable Defender behavior monitoring"
+    },
+    {
+     "match": "DISABLEIOAVPROTECTION",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable Defender IOAV protection"
+    },
+    {
+     "match": "DISABLESCRIPTSCANNING",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable Defender script scanning"
+    },
+    {
+     "match": "DISABLEBLOCKATFIRSTSIGHT",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable Defender block-at-first-sight"
+    },
+    {
+     "match": ".P7B",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Modify WDAC P7B policy (block AV startup)",
+     "context": "CIUPDATE"
+    },
+    {
+     "match": "WIPE",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Wipe WDAC P7B policy",
+     "context": "P7B"
+    },
+    {
+     "match": "SIPOLICY.P7B",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Access WDAC SIPolicy"
+    },
+    {
+     "match": "CI POLICIES",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Access WDAC CI policies"
+    },
+    {
+     "match": "ENABLELUA",
+     "type": "SecSetting",
+     "mitre": "T1548.002",
+     "note": "Disable UAC"
+    },
+    {
+     "match": "CONSENTPROMPTBEHAVIORADMIN",
+     "type": "SecSetting",
+     "mitre": "T1548.002",
+     "note": "Modify UAC prompt behavior"
+    },
+    {
+     "match": "FILTERADMINTOKEN",
+     "type": "SecSetting",
+     "mitre": "T1548.002",
+     "note": "UAC token filtering bypass"
+    },
+    {
+     "match": "DISABLETASKMGR",
+     "type": "SysSetting",
+     "mitre": "T1562",
+     "note": "Disable Task Manager"
+    },
+    {
+     "match": "DISABLECMD",
+     "type": "SysSetting",
+     "mitre": "T1562",
+     "note": "Disable Command Prompt"
+    },
+    {
+     "match": "DISABLEREGISTRYTOOLS",
+     "type": "SysSetting",
+     "mitre": "T1562",
+     "note": "Disable Registry Editor"
+    },
+    {
+     "match": "DISABLELOCKWORKSTATION",
+     "type": "SysSetting",
+     "mitre": "T1562",
+     "note": "Disable lock workstation"
+    },
+    {
+     "match": "SC STOP",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Stop XIGUASecurity service",
+     "context": "XIGUASECURITY"
+    },
+    {
+     "match": "SC DELETE",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Delete XIGUASecurity service",
+     "context": "XIGUASECURITY"
+    },
+    {
+     "match": "PROCDUMP",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Dump LSASS memory via ProcDump",
+     "context": "LSASS"
+    },
+    {
+     "match": "COMSVCS.DLL",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Dump LSASS via comsvcs.dll MiniDump",
+     "context": "MINIDUMP"
+    },
+    {
+     "match": "REG SAVE",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Export SAM hive (credential theft)",
+     "context": "HKLM\\SAM"
+    },
+    {
+     "match": "REG SAVE",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Export SYSTEM hive (credential theft)",
+     "context": "HKLM\\SYSTEM"
+    },
+    {
+     "match": "REG SAVE",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Export SECURITY hive (credential theft)",
+     "context": "HKLM\\SECURITY"
+    },
+    {
+     "match": "NTDSUTIL",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Snapshot AD database via ntdsutil",
+     "context": "IFM"
+    },
+    {
+     "match": "SEKURLSA",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Mimikatz sekurlsa module"
+    },
+    {
+     "match": "LSADUMP",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Mimikatz lsadump module"
+    },
+    {
+     "match": "MIMIKATZ",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Mimikatz credential dumper"
+    },
+    {
+     "match": "PWDUMP",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Password hash dumper"
+    },
+    {
+     "match": "PSEXEC",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "PsExec remote execution"
+    },
+    {
+     "match": "PSEXESVC",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "PsExec service installation"
+    },
+    {
+     "match": "WMIC /NODE:",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "WMI execution against a remote host"
+    },
+    {
+     "match": "ATEXEC",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "atexec remote task execution"
+    },
+    {
+     "match": "SHARPEXEC",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "SharpExec lateral movement tool"
+    },
+    {
+     "match": "NETSH INTERFACE PORTPROXY ADD",
+     "type": "PrivEsc",
+     "mitre": "T1105",
+     "note": "Add portproxy tunnel (traffic relay)"
+    },
+    {
+     "match": "WMIC SHADOWCOPY",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Delete shadow copies via WMI",
+     "context": "DELETE"
+    },
+    {
+     "match": "BCDEDIT",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Disable driver signature enforcement",
+     "context": "NOINTEGRITYCHECKS"
+    },
+    {
+     "match": "DEL /F /S /Q",
+     "type": "ShadowKill",
+     "mitre": "T1485",
+     "note": "Recursive force delete at drive root",
+     "context": "C:\\*"
+    },
+    {
+     "match": "RD /S /Q",
+     "type": "ShadowKill",
+     "mitre": "T1485",
+     "note": "Recursive directory removal at drive root",
+     "context": "C:\\*"
+    },
+    {
+     "match": "NETSH ADVFIREWALL SET",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Disable Windows Firewall (advanced)",
+     "context": "OFF"
+    },
+    {
+     "match": "NETSH FIREWALL SET OPMODE DISABLE",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Disable Windows Firewall (legacy)"
+    },
+    {
+     "match": "AUDITPOL",
+     "type": "SecSetting",
+     "mitre": "T1070",
+     "note": "Clear audit policy (anti-forensics)",
+     "context": "/CLEAR"
+    },
+    {
+     "match": "REG ADD",
+     "type": "SecSetting",
+     "mitre": "T1562.001",
+     "note": "Disable antivirus policy via reg add",
+     "context": "DISABLEANTIVIRUS"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA inline JavaScript execution",
+     "context": "JAVASCRIPT:"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA inline VBScript execution",
+     "context": "VBSCRIPT:"
+    }
+   ]
+  },
+  {
+   "id": "Agent.Cmdline.Suspect",
+   "kind": "ProcessCmdline",
+   "level": "suspect",
+   "score": 30,
+   "family": "Multi",
+   "behavior": "ProcessCmdline.TTP.Mid",
+   "patterns": [
+    {
+     "match": "SC CONFIG",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Disable a service via sc config",
+     "context": "START= DISABLED"
+    },
+    {
+     "match": "NET STOP",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Stop Volume Shadow Copy service",
+     "context": "VSS"
+    },
+    {
+     "match": "NET STOP",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Stop SQL service (ransomware prep)",
+     "context": "SQL"
+    },
+    {
+     "match": "NET STOP",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Stop MSSQL service (ransomware prep)",
+     "context": "MSSQL"
+    },
+    {
+     "match": "NET STOP",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Stop backup service (ransomware prep)",
+     "context": "BACKUP"
+    },
+    {
+     "match": "SC STOP",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Stop VSS service (ransomware prep)",
+     "context": "VSS"
+    },
+    {
+     "match": "SC STOP",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Stop MSSQL service (ransomware prep)",
+     "context": "MSSQL"
+    },
+    {
+     "match": "SCHTASKS",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create SYSTEM scheduled task (persistence)",
+     "context": "/RU SYSTEM"
+    },
+    {
+     "match": "SCHTASKS",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create scheduled task on remote host",
+     "context": "/S "
+    },
+    {
+     "match": "REGISTER-SCHEDULEDTASK",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Register scheduled task (persistence)"
+    },
+    {
+     "match": "SC CREATE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create service from Temp directory",
+     "context": "\\TEMP\\"
+    },
+    {
+     "match": "SC CREATE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create service from AppData",
+     "context": "\\APPDATA\\"
+    },
+    {
+     "match": "SC CREATE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create service from Downloads",
+     "context": "\\DOWNLOADS\\"
+    },
+    {
+     "match": "SC CREATE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create service from user directory",
+     "context": "\\USERS\\"
+    },
+    {
+     "match": "NETSH",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "netsh delete firewall rule",
+     "context": "DELETE RULE"
+    },
+    {
+     "match": "NETSH",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "netsh advfirewall change",
+     "context": "ADDFIREWALL"
+    },
+    {
+     "match": "CERTUTIL",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Certutil download (LoTL)",
+     "context": "-URLCACHE"
+    },
+    {
+     "match": "CERTUTIL",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Certutil base64 decode",
+     "context": "-DECODE"
+    },
+    {
+     "match": "BITSADMIN",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Bitsadmin download (LoTL)",
+     "context": "/TRANSFER"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA remote execution",
+     "context": "HTTP"
+    },
+    {
+     "match": "REGSVR32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Regsvr32 remote scriptlet",
+     "context": "/I:"
+    },
+    {
+     "match": "WMIC PROCESS CALL CREATE",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "WMI remote process creation"
+    },
+    {
+     "match": "INSTALLUTIL",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "InstallUtil abuse",
+     "context": "/LOGFILE="
+    },
+    {
+     "match": "RUNDLL32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Rundll32 from Temp",
+     "context": "\\TEMP\\"
+    },
+    {
+     "match": "REGASM",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Regasm from Temp",
+     "context": "\\TEMP\\"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA inline VBScript",
+     "context": "VBSCRIPT"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA inline JavaScript",
+     "context": "JAVASCRIPT"
+    },
+    {
+     "match": "RUNDLL32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Rundll32 JavaScript protocol",
+     "context": "JAVASCRIPT:"
+    },
+    {
+     "match": "REGSVR32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Regsvr32 remote scriptlet over HTTP",
+     "context": "/I:HTTP"
+    },
+    {
+     "match": "MSIEXEC",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSIExec install from URL",
+     "context": "HTTP"
+    },
+    {
+     "match": "MSIEXEC",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSIExec install from Temp",
+     "context": "\\TEMP\\"
+    },
+    {
+     "match": "WSCRIPT",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "WScript from Temp",
+     "context": "\\TEMP\\"
+    },
+    {
+     "match": "CSCRIPT",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "CScript from Temp",
+     "context": "\\TEMP\\"
+    },
+    {
+     "match": "RUNDLL32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Rundll32 loads module from AppData",
+     "context": "\\APPDATA\\"
+    },
+    {
+     "match": "RUNDLL32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Rundll32 loads module from ProgramData",
+     "context": "\\PROGRAMDATA\\"
+    },
+    {
+     "match": "RUNDLL32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Rundll32 loads module from Downloads",
+     "context": "\\DOWNLOADS\\"
+    },
+    {
+     "match": "RUNDLL32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Rundll32 loads module from user directory",
+     "context": "\\USERS\\"
+    },
+    {
+     "match": "REGSVR32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Regsvr32 loads module from AppData",
+     "context": "\\APPDATA\\"
+    },
+    {
+     "match": "REGSVR32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Regsvr32 loads module from ProgramData",
+     "context": "\\PROGRAMDATA\\"
+    },
+    {
+     "match": "REGSVR32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Regsvr32 loads module from Downloads",
+     "context": "\\DOWNLOADS\\"
+    },
+    {
+     "match": "REGSVR32",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Regsvr32 loads module from user directory",
+     "context": "\\USERS\\"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA runs script from AppData",
+     "context": "\\APPDATA\\"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA runs script from user directory",
+     "context": "\\USERS\\"
+    },
+    {
+     "match": "MSHTA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSHTA runs script from Downloads",
+     "context": "\\DOWNLOADS\\"
+    },
+    {
+     "match": "-W HIDDEN",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Hidden PowerShell window (-w hidden)",
+     "context": "POWERSHELL"
+    },
+    {
+     "match": "-W 1 ",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Hidden PowerShell window (-w 1)",
+     "context": "POWERSHELL"
+    },
+    {
+     "match": "CERTUTIL",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "Certutil remote download",
+     "context": "-URL"
+    },
+    {
+     "match": "FLTMC",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Detach file-system filter (anti-AV)",
+     "context": "DETACH"
+    },
+    {
+     "match": "-ENCODEDCOMMAND",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "PowerShell encoded command"
+    },
+    {
+     "match": "-ENC ",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "PowerShell encoded command",
+     "context": "POWERSHELL"
+    },
+    {
+     "match": "FROMMBASE64STRING",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Base64 payload decode"
+    },
+    {
+     "match": "-WINDOWSTYLE HIDDEN",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Hidden PowerShell window",
+     "context": "POWERSHELL"
+    },
+    {
+     "match": "-NOPROFILE",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "PowerShell execution policy bypass",
+     "context": "-EXECUTIONPOLICY BYPASS"
+    },
+    {
+     "match": "DOWNLOADSTRING",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "PowerShell remote download"
+    },
+    {
+     "match": "INVOKE-EXPRESSION",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "PowerShell Invoke-Expression"
+    },
+    {
+     "match": "SCHTASKS /CREATE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create scheduled task"
+    },
+    {
+     "match": "REGSVR32",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Load comsvcs.dll (credential dump precursor)",
+     "context": "COMSVCS"
+    },
+    {
+     "match": "VAULTCMD",
+     "type": "PrivEsc",
+     "mitre": "T1106",
+     "note": "Enumerate stored credentials via vaultcmd",
+     "context": "/LISTCREDS"
+    },
+    {
+     "match": "WINRS",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "WinRS remote shell",
+     "context": "-R:"
+    },
+    {
+     "match": "SC",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "Service control against a remote host",
+     "context": "\\\\"
+    },
+    {
+     "match": "PLINK",
+     "type": "PrivEsc",
+     "mitre": "T1105",
+     "note": "Reverse tunnel via plink",
+     "context": "-R "
+    },
+    {
+     "match": "NGROK",
+     "type": "PrivEsc",
+     "mitre": "T1105",
+     "note": "Ngrok tunnel (inbound remote access)"
+    },
+    {
+     "match": "FRPC",
+     "type": "PrivEsc",
+     "mitre": "T1105",
+     "note": "frp tunnel client",
+     "context": "-C "
+    },
+    {
+     "match": "CHISEL",
+     "type": "PrivEsc",
+     "mitre": "T1105",
+     "note": "Chisel tunnel"
+    },
+    {
+     "match": "MANAGE-BDE",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Turn off BitLocker (recovery inhibition)",
+     "context": "-OFF"
+    },
+    {
+     "match": "BCDEDIT",
+     "type": "ShadowKill",
+     "mitre": "T1490",
+     "note": "Enable test signing (driver load bypass)",
+     "context": "TESTSIGNING ON"
+    },
+    {
+     "match": "ESENTUTL",
+     "type": "ShadowKill",
+     "mitre": "T1070",
+     "note": "Esentutl /y (locked file copy / bypass)",
+     "context": "/Y"
+    },
+    {
+     "match": "NETSH ADVFIREWALL FIREWALL ADD RULE",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Add inbound firewall allow rule",
+     "context": "ALLOW"
+    },
+    {
+     "match": "WINRM QUICKCONFIG",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Enable WinRM remote management"
+    },
+    {
+     "match": "HH.EXE",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "hh.exe opens remote compiled help (LotL)",
+     "context": "HTTP"
+    },
+    {
+     "match": "FORFILES",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "forfiles spawning cmd (LotL)",
+     "context": "/C CMD"
+    },
+    {
+     "match": "PCALUA",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "pcalua.exe program compatibility abuse",
+     "context": "-A"
+    },
+    {
+     "match": "XWIZARD",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "xwizard.dll ClassID execution (LotL)",
+     "context": "-CLASSID"
+    },
+    {
+     "match": "CSC.EXE",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Compile code at runtime with csc.exe",
+     "context": "/OUT:"
+    },
+    {
+     "match": " USE ",
+     "type": "PrivEsc",
+     "mitre": "T1543",
+     "note": "Mount admin share via net.exe (T1021)",
+     "context": "ADMIN$"
+    },
+    {
+     "match": " USE ",
+     "type": "PrivEsc",
+     "mitre": "T1543",
+     "note": "Plaintext account in net use command (T1021)",
+     "context": "/USER:"
+    },
+    {
+     "match": "PSEXESVC",
+     "type": "PrivEsc",
+     "mitre": "T1543",
+     "note": "PsExec service execution (T1021)"
+    },
+    {
+     "match": "NTDSUTIL",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "ntdsutil AD snapshot (T1003)",
+     "context": "NTDS"
+    },
+    {
+     "match": "NTDSUTIL",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "ntdsutil snapshot mount (T1003)",
+     "context": "SNAPSHOT"
+    },
+    {
+     "match": "NETSH",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Harvest WiFi credentials via netsh key=clear (T1552)",
+     "context": "=CLEAR"
+    },
+    {
+     "match": "SIMONTATHAM",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export PuTTY credentials from registry (T1552)"
+    },
+    {
+     "match": "MOBATEK",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export MobaXterm credentials from registry (T1552)"
+    },
+    {
+     "match": "MARTIN PRIKRYL",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export WinSCP credentials from registry (T1552)"
+    },
+    {
+     "match": "AEROFOX",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export Foxmail credentials from registry (T1552)"
+    },
+    {
+     "match": "OPENVPN-GUI",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export OpenVPN credentials from registry (T1552)"
+    },
+    {
+     "match": "REALVNC",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export VNC password from registry (T1552)"
+    },
+    {
+     "match": "TIGHTVNC",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export VNC password from registry (T1552)"
+    },
+    {
+     "match": "RADMIN",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export Radmin password from registry (T1552)"
+    },
+    {
+     "match": "COREFTP",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export CoreFTP credentials from registry (T1552)"
+    },
+    {
+     "match": "DOWNLOADMANAGER\\PASSWORDS",
+     "type": "CmdExec",
+     "mitre": "T1112",
+     "note": "Export IDM credentials from registry (T1552)"
+    },
+    {
+     "match": "AUTHTOKEN",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "ngrok authtoken (T1090)"
+    },
+    {
+     "match": " TCP 139",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "ngrok TCP 139 tunnel (T1090)"
+    },
+    {
+     "match": " TCP 445",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "ngrok TCP 445 tunnel (T1090)"
+    },
+    {
+     "match": " TCP 3389",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "ngrok RDP tunnel (T1090)"
+    },
+    {
+     "match": "-VKEY=",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "NPS tunneling client (T1090)"
+    },
+    {
+     "match": "SSH.EXE",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "SSH RDP tunneling (T1572)",
+     "context": ":3389"
+    },
+    {
+     "match": "PLINK",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "Plink reverse port forwarding (T1572)",
+     "context": " -R "
+    },
+    {
+     "match": "BASH.EXE",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Indirect inline command via bash.exe (WSL)",
+     "context": " -C "
+    },
+    {
+     "match": "BITSADMIN",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "File download via bitsadmin",
+     "context": "/ADDFILE"
+    },
+    {
+     "match": "BITSADMIN",
+     "type": "CmdExec",
+     "mitre": "T1105",
+     "note": "File download via bitsadmin",
+     "context": "/TRANSFER"
+    },
+    {
+     "match": "CMDKEY",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "Generic credentials via cmdkey (T1003)",
+     "context": "-G"
+    },
+    {
+     "match": "COPY ",
+     "type": "CmdExec",
+     "mitre": "T1490",
+     "note": "Copy files from VolumeShadowCopy (T1003)",
+     "context": "GLOBALROOT"
+    },
+    {
+     "match": "EXCLUSIONPATH",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Defender exclusion path"
+    },
+    {
+     "match": "EXCLUSIONPROCESS",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Defender exclusion process"
+    },
+    {
+     "match": "EXCLUSIONEXTENSION",
+     "type": "SecSetting",
+     "mitre": "T1562",
+     "note": "Defender exclusion extension"
+    },
+    {
+     "match": "CERTUTIL",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Decode payload via certutil (T1140)",
+     "context": "-DECODE"
+    },
+    {
+     "match": "CERTUTIL",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "Decode payload via certutil (T1140)",
+     "context": "-DECODEHEX"
+    },
+    {
+     "match": "GET-PROCESS",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "PowerShell Get-Process lsass (T1003)",
+     "context": "LSASS"
+    },
+    {
+     "match": "GPS ",
+     "type": "CmdExec",
+     "mitre": "T1059",
+     "note": "PowerShell gps lsass (T1003)",
+     "context": "LSASS"
+    },
+    {
+     "match": "WEVTUTIL",
+     "context": "CL",
+     "type": "AntiForensic",
+     "mitre": "T1070.001",
+     "note": "Clear event log (XIGUA composite)"
+    },
+    {
+     "match": "WEVTUTIL",
+     "context": "CLEAR-LOG",
+     "type": "AntiForensic",
+     "mitre": "T1070.001",
+     "note": "Clear event log via ps (XIGUA)"
+    },
+    {
+     "match": "AUDITPOL",
+     "context": "/CLEAR",
+     "type": "AntiForensic",
+     "mitre": "T1562.002",
+     "note": "Clear audit policy (XIGUA)"
+    },
+    {
+     "match": "AUDITPOL",
+     "context": "/SET /SUCCESS:DISABLE",
+     "type": "AntiForensic",
+     "mitre": "T1562.002",
+     "note": "Disable success audit (XIGUA)"
+    },
+    {
+     "match": "RUNDLL32",
+     "context": "URL.DLL",
+     "type": "CmdExec",
+     "mitre": "T1218.011",
+     "note": "rundll32 url.dll OpenURL proxy exec (XIGUA)"
+    },
+    {
+     "match": "REG ADD",
+     "context": "WINLOGON",
+     "type": "RegWrite",
+     "mitre": "T1543",
+     "note": "reg add winlogon hijack (XIGUA)"
+    },
+    {
+     "match": "REG ADD",
+     "context": "IMAGE FILE EXECUTION OPTIONS",
+     "type": "SecSetting",
+     "mitre": "T1546",
+     "note": "reg add IFEO hijack (XIGUA)"
+    },
+    {
+     "match": "REG ADD",
+     "context": "SILENTPROCESSEXIT",
+     "type": "SecSetting",
+     "mitre": "T1546",
+     "note": "reg add SilentProcessExit (XIGUA)"
+    },
+    {
+     "match": "ADD-MPPREFERENCE",
+     "context": "-EXCLUSIONPATH",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Add Defender exclusion (XIGUA)"
+    },
+    {
+     "match": "ADD-MPPREFERENCE",
+     "context": "-EXCLUSIONPROCESS",
+     "type": "AntiAV",
+     "mitre": "T1562.001",
+     "note": "Add Defender process exclusion (XIGUA)"
+    },
+    {
+     "match": "NET USER",
+     "context": "/ADD",
+     "type": "CmdExec",
+     "mitre": "T1136.001",
+     "note": "Create local account (XIGUA)"
+    }
+   ]
+  },
+  {
+   "id": "Agent.Cmdline.Weak",
+   "kind": "ProcessCmdline",
+   "level": "weak",
+   "score": 10,
+   "family": "Multi",
+   "behavior": "ProcessCmdline.TOP.Low",
+   "patterns": [
+    {
+     "match": "FODHELPER",
+     "type": "PrivEsc",
+     "mitre": "T1548.002",
+     "note": "UAC bypass via fodhelper"
+    },
+    {
+     "match": "EVENTVWR",
+     "type": "PrivEsc",
+     "mitre": "T1548.002",
+     "note": "UAC bypass via eventvwr"
+    },
+    {
+     "match": "SDCLT",
+     "type": "PrivEsc",
+     "mitre": "T1548.002",
+     "note": "UAC bypass via sdclt"
+    },
+    {
+     "match": "CMSTP",
+     "type": "PrivEsc",
+     "mitre": "T1218",
+     "note": "UAC bypass via cmstp"
+    },
+    {
+     "match": "MSBUILD",
+     "type": "CmdExec",
+     "mitre": "T1218",
+     "note": "MSBuild abuse"
+    },
+    {
+     "match": "SC CREATE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create service or driver"
+    },
+    {
+     "match": "SC START",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Start service or driver"
+    },
+    {
+     "match": "SC CONFIG",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Modify service config"
+    },
+    {
+     "match": "SCHTASKS /CHANGE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Modify scheduled task"
+    },
+    {
+     "match": "NET USER /ADD",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Create local user account"
+    },
+    {
+     "match": "NET LOCALGROUP ADMINISTRATORS /ADD",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "Add user to administrators"
+    },
+    {
+     "match": "NEW-SERVICE",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "PowerShell create service"
+    },
+    {
+     "match": "REGISTER-SCHEDULEDTASK",
+     "type": "CmdExec",
+     "mitre": "T1543",
+     "note": "PowerShell create scheduled task"
+    },
+    {
+     "match": "VMWARE",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Probe VMware environment"
+    },
+    {
+     "match": "VBOX",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Probe VirtualBox environment"
+    },
+    {
+     "match": "VBOXMANAGE",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Probe VirtualBox environment"
+    },
+    {
+     "match": "SANDBOXIE",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Probe Sandboxie environment"
+    },
+    {
+     "match": "VMTOOLSD",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Probe VMware tools"
+    },
+    {
+     "match": "WIN32_BIOS",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query BIOS info (VM detection)"
+    },
+    {
+     "match": "WIN32_COMPUTERSYSTEM",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query computer system (VM detection)"
+    },
+    {
+     "match": "WIN32_BASEBOARD",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query baseboard (VM detection)"
+    },
+    {
+     "match": "WIN32_VIDEOCONTROLLER",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query video controller (VM detection)"
+    },
+    {
+     "match": "GETMAC",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query MAC address (VM detection)"
+    },
+    {
+     "match": "WMIC DISKDRIVE",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query disk drive (VM detection)"
+    },
+    {
+     "match": "WMIC CSPRODUCT",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query system product (VM detection)"
+    },
+    {
+     "match": "SYSTEMINFO",
+     "type": "VmDetect",
+     "mitre": "T1497",
+     "note": "Query system info (VM detection)"
+    },
+    {
+     "match": "CHECKREMOTEDEBUGGERPRESENT",
+     "type": "AntiDebug",
+     "mitre": "T1622",
+     "note": "Anti-debug check"
+    },
+    {
+     "match": "ISDEBUGGERPRESENT",
+     "type": "AntiDebug",
+     "mitre": "T1622",
+     "note": "Anti-debug check"
+    },
+    {
+     "match": "NTQUERYINFORMATIONPROCESS",
+     "type": "AntiDebug",
+     "mitre": "T1622",
+     "note": "Anti-debug via NtQueryInformationProcess",
+     "context": "DEBUG"
+    }
+   ]
+  }
+ ],
+ "combo": {
+  "malicious_immediate": true,
+  "combo_threshold": 60,
+  "combo_min_types": 3,
+  "suspect_threshold": 30,
+  "suspect_min_types": 2,
+  "module_load_score": 20,
+  "window_seconds": 120,
+  "combo_rule": "Agent.Combo.HighConfidence",
+  "combo_behavior": "ProcessCombo.SuspiciousChain",
+  "suspect_rule": "Agent.Combo.SuspectChain",
+  "suspect_behavior": "ProcessCombo.SuspectChain"
+ },
+ "exemptions": [
+  {
+   "image_suffix": "\\SevenAgent\\SevenAgent.exe",
+   "reason": "AgentSelf"
+  },
+  {
+   "image_suffix": "\\SevenEndPoint.exe",
+   "reason": "MainController"
+  },
+  {
+   "directory_suffix": "\\SevenEndpointSecurity\\",
+   "reason": "ProductTree"
+  }
+ ]
+}

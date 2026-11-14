@@ -1,0 +1,10 @@
+{
+  "version": "1.0",
+  "enabled": true,
+  "_doc": "进程镂空防护(Process Hollowing, T1055.012)外置规则。原理: MemoryGuard句柄扫描发现跨进程VM写句柄(已豁免父子/同exe路径/系统目录owner) -> 延迟取证: 读目标进程 PEB.ImageBaseAddress 处内存PE头, 与磁盘PE头硬比对(lfanew/Machine/NumberOfSections/EntryPoint/SizeOfImage)。合法软件不改自己内存中的PE头 => 内存!=磁盘即铁证, 不靠名字/启发式打分, 误报趋零。豁免三层: 1)Rules/White.json allow规则(进程类kind)命中目标路径 -> 行为规则豁免; 2)exempt_paths + 系统树/产品树/自家链 -> 结构豁免; 3)内存头==磁盘头 -> 永不告警。处置: 终止注入者链 + 隔离注入者镜像(系统树绝不隔离) + 终止被镂空目标单体 + Threat Quarantined 通知 + 链报告。局限(如实): NTFS事务镂空(transacted hollowing)无差异可读; 目标秒退来不及取证; WOW64(32位目标)首版跳过。",
+  "verify_scope": "injection_targets",
+  "verify_delay_s": 1.5,
+  "max_queue": 64,
+  "fields": ["lfanew", "machine", "nsec", "ep", "sizeofimage"],
+  "exempt_paths": []
+}
