@@ -40,7 +40,8 @@
 
 ## 鸣谢
 
-- 致谢：WinDF-NES 、 Shiyi、QBZ-191、MEMZUAC
+- 致谢：WinDF-NES 、 Shiyi、QBZ-191、MEMZUAC、零度C-Mint
+- 零度C-Mint（SouXiao引擎作者，QQ:3327867352）为SevenEngine V2（旧版本）提供了黑样本特征
 - MEMZUAC（西瓜杀毒作者，QQ:3118296183）为SevenEndpoint提供了上百条行为规则
 - WinDF（NES室长，QQ:3293269439）为SevenEndpoint提供了WinUI3控制台版本的Frok（暂未上线），并提供了正式、实验性和预览三个更新通道
 - Shiyi（Xdows作者，QQ:2966643247）为SevenEndpoint提供了Xdows的全系列引擎
