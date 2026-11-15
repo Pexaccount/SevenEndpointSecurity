@@ -58,6 +58,7 @@ _INT_TYPE_EN = {
     'MSI拦截': 'MSI Install Intercept',
     '主防-hosts回滚': 'Hosts Revert',
     '主防-危险命令': 'Dangerous Command',
+    '主防-进程镂空': 'Process Hollowing',
     '主防-注册表回滚': 'Registry Revert',
     '命令拦截': 'Command Intercept',
     '威胁标签循环击杀': 'Threat-Tag Loop Kill',
@@ -135,6 +136,7 @@ EDR_EVENT_POINTS = {
     'lsass_access': 15,        # LSASS 凭据读取(mimikatz式)
     'uac_bypass': 10,          # UAC bypass(fodhelper/computerdefaults等)
     'ransom_op': 10,           # 勒索式批量文件操作
+    'dropper': 10,             # 释放可执行文件(可疑目录+10/其他+5级) —— dropper 行为链信号
     'av_tamper': 20,           # 对抗安全软件(杀AV/加排除项/关防护)——银狐标志行为
     'cred_dump': 20,           # 凭据转储(comsvcs MiniDump/mimikatz式)
     'ioa': 25,                 # IOA动态行为关联命中(多强信号时间窗内共现)
@@ -176,12 +178,12 @@ _DANGEROUS_CMD_PATTERNS = (
     ('av_tamper', 20, re.compile(
         r'set-mppreference|add-mppreference|-exclusionpath|-exclusionprocess|-exclusionextension'
         r'|disablerealtimemonitoring|disablebehaviormonitoring'
-        r'|taskkill\s+[^&|]*\b(360tray|360safe|360hipstray|zhudongfangyu|hipstray|hipsdaemon|wsctrl|usysdiag|qqpctray|qqpcrtp|kxetray|kwsprotect)\b'
-        r'|net\s+stop\s+[^&|]*\b(360tray|360safe|zhudongfangyu|hipsdaemon|hipstray|kwsprotect|qqpcrtp|kwatchsvc)\b'
-        r'|sc\s+(stop|delete|config)\s+[^&|]*\b(360tray|360safe|zhudongfangyu|hipsdaemon|hipstray|kwsprotect|qqpcrtp)\b'
+        r'|(?:[a-z]:\\[^\s\"]*\\)?taskkill(?:\.exe)?\s+[^&|]*\b(360tray|360safe|360hipstray|zhudongfangyu|hipstray|hipsdaemon|wsctrl|usysdiag|qqpctray|qqpcrtp|kxetray|kwsprotect)\b'
+        r'|(?:[a-z]:\\[^\s\"]*\\)?net(?:\.exe)?\s+stop\s+[^&|]*\b(360tray|360safe|zhudongfangyu|hipsdaemon|hipstray|kwsprotect|qqpcrtp|kwatchsvc)\b'
+        r'|(?:[a-z]:\\[^\s\"]*\\)?sc(?:\.exe)?\s+(stop|delete|config)\s+[^&|]*\b(360tray|360safe|zhudongfangyu|hipsdaemon|hipstray|kwsprotect|qqpcrtp)\b'
         r'|wmic\s+process\s+where\s+[^&|]*\b(360tray|360safe|hipsdaemon|qqpctray|kxetray|usysdiag)\b'
-        r'|sc\s+(stop|delete|config)\s+[^&|]*seven(processprotect|file|endpoint|watch|systemprotect|edr|hips|protect)'
-        r'|net\s+stop\s+[^&|]*seven(file|watch|edr|hips)', re.I)),
+        r'|(?:[a-z]:\\[^\s\"]*\\)?sc(?:\.exe)?\s+(stop|delete|config)\s+[^&|]*seven(processprotect|file|endpoint|watch|systemprotect|edr|hips|protect)'
+        r'|(?:[a-z]:\\[^\s\"]*\\)?net(?:\.exe)?\s+stop\s+[^&|]*seven(file|watch|edr|hips)', re.I)),
     ('cred_dump', 20, re.compile(
         r'comsvcs\.dll[^\r\n]*minidump|procdump\s+(?:-ma\s+)?[^\r\n]*lsass|lsass[^\r\n]*\.dmp'
         r'|secretsdump|mimikatz', re.I)),
@@ -354,7 +356,10 @@ def _edr_add_event(pid, name, path, etype, points=None, detail=''):
                             _r['last_origin'] = origin_pid
                 except Exception:
                     pass
-                _edr_enforce_chain(origin_pid)
+                # DefenseMode promises process release: keep score-based evidence and reporting,
+                # but do not terminate a process chain from this threshold.
+                if not bool(g_settings.get('DefenseMode', False)):
+                    _edr_enforce_chain(origin_pid)
         return score
     except Exception as e:
         _log("[EDR评分] 异常: {}".format(e))
@@ -527,6 +532,357 @@ def _abd_excluded(pl):
                 or (pl.startswith(BASE_DIR.lower()) if BASE_DIR else False))
     except Exception:
         return True
+
+# ============================ 进程镂空防护(Process Hollowing, T1055.012) ============================
+# 哲学与 ABD 一致: 事后取证铁证, 不靠名字/启发式打分 -> 低误报(核心需求)。
+# 信号源: MemoryGuard 句柄扫描的 injection 观察目标(跨进程 VM 写句柄且非父子/同exe/系统目录 owner
+#         —— 触发源层已完成一轮结构性豁免)。
+# 铁证: 延迟回读目标进程内存 PE 头(PEB.ImageBaseAddress) 与磁盘文件 PE 头硬比对;
+#       合法软件不改自己内存中的 PE 头 -> 内存 != 磁盘 = 被镂空/内存改写, 误报趋零。
+# 外置规则: Rules/Hollow.json (enabled/verify_scope/verify_delay_s/max_queue/fields/exempt_paths)。
+# 豁免三层(低误报核心):
+#   1) Rules/White.json allow 规则(进程类 kind)命中目标路径 -> 行为规则豁免, 不校验;
+#   2) Hollow.json exempt_paths + 系统树/产品树(_abd_excluded) + 自家链(_is_own_chain_pid) -> 跳过;
+#   3) 比对本身: 内存头 == 磁盘头 -> 永不告警(结构豁免)。
+# 处置(与 ABD 一致): 终止注入者链 + 隔离注入者镜像(感染源, 系统树绝不隔离) +
+#                    终止被镂空目标单体(其内存已是攻击者代码) + Threat 通知 + 链报告。
+# 局限(如实): NTFS 事务镂空(transacted hollowing)无差异可读; 目标秒退来不及取证;
+#             WOW64(32 位目标)首版跳过。
+import fnmatch as _fnmatch
+_g_hollow_lock = threading.Lock()
+_g_hollow_queue = {}      # tpid -> dict(ts, tname, writer_pid, writer_name, writer_path)
+_g_hollow_verified = {}   # tpid -> ts 近期已校验(600s 不重复)
+_g_hollow_cfg = None
+_g_hollow_cfg_mtime = object()
+_g_hollow_last_err_ts = 0.0
+_g_hollow_parent = None
+_g_hollow_worker_started = False
+_HOLLOW_FIELDS = ('lfanew', 'machine', 'nsec', 'ep', 'sizeofimage')
+
+def _hollow_load_cfg():
+    """加载 Rules/Hollow.json(mtime 缓存热重载); 无文件/损坏 -> 关闭默认(不猜)。"""
+    global _g_hollow_cfg, _g_hollow_cfg_mtime
+    try:
+        fp = os.path.join(IOA_RULES_DIR, 'Hollow.json')
+        try:
+            mt = os.path.getmtime(fp)
+        except OSError:
+            mt = None
+        if _g_hollow_cfg_mtime == mt and _g_hollow_cfg is not None:
+            return _g_hollow_cfg
+        cfg = {'enabled': False, 'verify_scope': 'injection_targets', 'verify_delay_s': 1.5,
+               'max_queue': 64, 'fields': list(_HOLLOW_FIELDS), 'exempt_paths': []}
+        if mt is not None:
+            try:
+                with open(fp, 'r', encoding='utf-8-sig') as f:
+                    data = json.load(f)
+                cfg['enabled'] = bool(data.get('enabled', False))
+                if data.get('verify_scope'):
+                    cfg['verify_scope'] = str(data['verify_scope'])
+                try:
+                    cfg['verify_delay_s'] = max(0.5, min(float(data.get('verify_delay_s') or 1.5), 30.0))
+                except Exception:
+                    pass
+                try:
+                    cfg['max_queue'] = max(8, min(int(data.get('max_queue') or 64), 256))
+                except Exception:
+                    pass
+                flds = [str(x) for x in (data.get('fields') or []) if str(x) in _HOLLOW_FIELDS]
+                if flds:
+                    cfg['fields'] = flds
+                cfg['exempt_paths'] = [str(x).lower() for x in (data.get('exempt_paths') or [])]
+            except Exception as e:
+                # 瞬时读取失败(EDR文件扫描句柄竞争等)不能缓存死: mt 置 None 强制下轮重试
+                mt = None
+                cfg['enabled'] = False
+                global _g_hollow_last_err_ts
+                now_e = time.time()
+                if now_e - _g_hollow_last_err_ts > 30:
+                    _g_hollow_last_err_ts = now_e
+                    _log('[镂空] 规则加载失败(保持关闭, 自动重试): {}'.format(e))
+        _g_hollow_cfg_mtime = mt
+        _g_hollow_cfg = cfg
+        return cfg
+    except Exception:
+        return _g_hollow_cfg or {'enabled': False, 'verify_scope': 'injection_targets',
+                                 'verify_delay_s': 1.5, 'max_queue': 64,
+                                 'fields': list(_HOLLOW_FIELDS), 'exempt_paths': []}
+
+def _hollow_parse_header_bytes(b):
+    """解析 PE 头(内存镜像或磁盘文件前 0x400 字节) -> dict 或 None(非 PE/截断)。"""
+    try:
+        if not b or len(b) < 0x100 or b[:2] != b'MZ':
+            return None
+        lfanew = int.from_bytes(b[0x3C:0x40], 'little')
+        if lfanew <= 0 or lfanew + 0x100 > len(b) or b[lfanew:lfanew + 4] != b'PE\x00\x00':
+            return None
+        machine = int.from_bytes(b[lfanew + 4:lfanew + 6], 'little')
+        nsec = int.from_bytes(b[lfanew + 6:lfanew + 8], 'little')
+        ep = int.from_bytes(b[lfanew + 24 + 16:lfanew + 24 + 20], 'little')
+        sizeofimage = int.from_bytes(b[lfanew + 24 + 56:lfanew + 24 + 60], 'little')
+        return {'lfanew': lfanew, 'machine': machine, 'nsec': nsec,
+                'ep': ep, 'sizeofimage': sizeofimage}
+    except Exception:
+        return None
+
+def _hollow_disk_header(path):
+    """读目标进程磁盘镜像前 0x400 字节解析 PE 头; 失败返回 None(不判, 不误报)。"""
+    try:
+        with open(path, 'rb') as f:
+            return _hollow_parse_header_bytes(f.read(0x400))
+    except Exception:
+        return None
+
+_g_hollow_white = None
+_g_hollow_white_mtime = None
+
+def _hollow_white_exempt(tpath):
+    """行为规则豁免: Rules/White.json allow 规则(进程类 kind 或未限 kind)命中目标路径 -> 免校验。"""
+    global _g_hollow_white, _g_hollow_white_mtime
+    try:
+        fp = os.path.join(IOA_RULES_DIR, 'White.json')
+        try:
+            mt = os.path.getmtime(fp)
+        except OSError:
+            mt = None
+        if mt != _g_hollow_white_mtime or _g_hollow_white is None:
+            rules = []
+            if mt is not None:
+                try:
+                    with open(fp, 'r', encoding='utf-8-sig') as f:
+                        data = json.load(f)
+                    for r in (data.get('rules') or []):
+                        if (r.get('action') or '').lower() != 'allow':
+                            continue
+                        kinds = r.get('kinds')
+                        if kinds and not any(str(k).lower().startswith('process') for k in kinds):
+                            continue  # 镂空属进程类操作, 只受进程类/未限 kind 白名单豁免
+                        rules.append([str(g).lower() for g in (r.get('glob') or [])])
+                except Exception:
+                    pass
+            _g_hollow_white, _g_hollow_white_mtime = rules, mt
+        pl = os.path.normcase(os.path.normpath(str(tpath or '')))
+        if not pl:
+            return False
+        for globs in _g_hollow_white:
+            for g in globs:
+                try:
+                    if _fnmatch.fnmatch(pl, g):
+                        return True
+                except Exception:
+                    continue
+        return False
+    except Exception:
+        return False
+
+def _hollow_read_mem_header(h):
+    """读目标进程 PEB.ImageBaseAddress 处 0x400 字节(仅 x64 目标); 失败/受保护 -> None(不判)。"""
+    try:
+        ntdll = ctypes.windll.ntdll
+        k32 = ctypes.windll.kernel32
+
+        class _PBI(ctypes.Structure):
+            _fields_ = [('ExitStatus', ctypes.c_void_p), ('PebBaseAddress', ctypes.c_void_p),
+                        ('AffinityMask', ctypes.c_void_p), ('BasePriority', ctypes.c_void_p),
+                        ('UniqueProcessId', ctypes.c_void_p),
+                        ('InheritedFromUniqueProcessId', ctypes.c_void_p)]
+        pbi = _PBI()
+        rl = ctypes.c_ulong()
+        st = ntdll.NtQueryInformationProcess(ctypes.c_void_p(h), 0, ctypes.byref(pbi),
+                                             ctypes.sizeof(pbi), ctypes.byref(rl))
+        if (st & 0xFFFFFFFF) or not pbi.PebBaseAddress:
+            return None
+        base = ctypes.c_ulonglong()
+        if not k32.ReadProcessMemory(ctypes.c_void_p(h),
+                                     ctypes.c_void_p(pbi.PebBaseAddress + 0x10),
+                                     ctypes.byref(base), 8, None):
+            return None
+        if not base.value:
+            return None
+        buf = ctypes.create_string_buffer(0x400)
+        if not k32.ReadProcessMemory(ctypes.c_void_p(h), ctypes.c_void_p(base.value),
+                                     buf, 0x400, None):
+            return None
+        return buf.raw[:0x400]
+    except Exception:
+        return None
+
+def _hollow_note_target(tpid, tname, writer_pid, writer_name, writer_path=''):
+    """MemoryGuard injection 观察挂钩: 目标进入镂空校验队列(去重/限流, 由 worker 延迟取证)。"""
+    try:
+        cfg = _hollow_load_cfg()
+        if not cfg.get('enabled'):
+            return
+        tpid = int(tpid or 0)
+        if tpid <= 0:
+            return
+        now = time.time()
+        with _g_hollow_lock:
+            if now - _g_hollow_verified.get(tpid, 0) < 600:
+                return  # 近期已校验过该目标
+            q = _g_hollow_queue.get(tpid)
+            if q and now - q['ts'] < 600:
+                return
+            if len(_g_hollow_queue) >= int(cfg.get('max_queue') or 64):
+                oldest = min(_g_hollow_queue, key=lambda k: _g_hollow_queue[k]['ts'])
+                _g_hollow_queue.pop(oldest, None)
+            _g_hollow_queue[tpid] = {'ts': now, 'tname': str(tname or ''),
+                                     'writer_pid': int(writer_pid or 0),
+                                     'writer_name': str(writer_name or ''),
+                                     'writer_path': str(writer_path or '')}
+    except Exception:
+        pass
+
+def _hollow_worker_start(parent):
+    """惰性启动取证 worker(由 MemoryGuard.start 调用一次)。"""
+    global _g_hollow_parent, _g_hollow_worker_started
+    try:
+        _g_hollow_parent = parent
+        with _g_hollow_lock:
+            if _g_hollow_worker_started:
+                return
+            _g_hollow_worker_started = True
+        threading.Thread(target=_hollow_worker, daemon=True, name='HollowGuard').start()
+        _log("[镂空防护] HollowGuard 已启动(事后内存取证: Rules/Hollow.json)")
+    except Exception:
+        pass
+
+def _hollow_worker():
+    while True:
+        try:
+            cfg = _hollow_load_cfg()
+            if cfg.get('enabled'):
+                now = time.time()
+                delay = float(cfg.get('verify_delay_s') or 1.5)
+                with _g_hollow_lock:
+                    due = [tp for tp, q in _g_hollow_queue.items() if now - q['ts'] >= delay]
+                for tp in due[:8]:  # 每轮最多 8 个: 取证含磁盘读, 限流
+                    with _g_hollow_lock:
+                        rec = _g_hollow_queue.pop(tp, None)
+                    if rec:
+                        _hollow_verify(tp, rec, cfg)
+            time.sleep(0.5)
+        except Exception:
+            time.sleep(2)
+
+def _hollow_verify(tpid, rec, cfg=None):
+    """镂空取证: 目标内存 PE 头 vs 磁盘 PE 头。一致 -> 放行(结构豁免); 差异 -> 铁证处置。
+    任何取证步骤失败(打不开进程/受保护/非PE) -> 静默跳过, 不判不误报。"""
+    try:
+        tpid = int(tpid or 0)
+        cfg = cfg or _hollow_load_cfg()
+        if tpid <= 0 or not cfg.get('enabled'):
+            return
+        now = time.time()
+        with _g_hollow_lock:
+            _g_hollow_verified[tpid] = now
+            if len(_g_hollow_verified) > 2000:
+                for k in [k for k, t in _g_hollow_verified.items() if now - t > 1800][:1000]:
+                    _g_hollow_verified.pop(k, None)
+        k32 = ctypes.windll.kernel32
+        h = k32.OpenProcess(0x0410, False, tpid)  # QUERY_LIMITED_INFORMATION | VM_READ
+        if not h:
+            return  # 打不开 = 无法取证, 静默跳过
+        try:
+            wow = ctypes.c_int(0)
+            if k32.IsWow64Process(ctypes.c_void_p(h), ctypes.byref(wow)) and wow.value:
+                return  # 豁免: 32 位目标(WOW64)首版跳过
+            tbuf = ctypes.create_unicode_buffer(520)
+            sz = ctypes.c_ulong(520)
+            if not k32.QueryFullProcessImageNameW(ctypes.c_void_p(h), 0, tbuf, ctypes.byref(sz)):
+                return
+            tpath = tbuf.value
+            if not tpath:
+                return
+            # ---- 豁免层(任一命中即放行, 低误报核心) ----
+            if _hollow_white_exempt(tpath):
+                return  # 行为规则豁免
+            pl = os.path.normcase(tpath)
+            for ex in (cfg.get('exempt_paths') or []):
+                try:
+                    if _fnmatch.fnmatch(pl, str(ex).lower()):
+                        return
+                except Exception:
+                    continue
+            if _abd_excluded(pl) or _is_own_chain_pid(tpid):
+                return  # 系统树/产品树/自家链
+            dhdr = _hollow_disk_header(tpath)
+            if not dhdr:
+                return  # 磁盘非 PE/读失败: 无法比对, 不判
+            raw = _hollow_read_mem_header(h)
+            mhdr = _hollow_parse_header_bytes(raw) if raw else None
+            if not mhdr:
+                return  # 内存头不可读/非PE(合法解包/重映射): 不判, 低误报优先
+            fields = [f for f in (cfg.get('fields') or list(_HOLLOW_FIELDS))
+                      if f in _HOLLOW_FIELDS] or list(_HOLLOW_FIELDS)
+            diffs = [(f, dhdr.get(f), mhdr.get(f)) for f in fields
+                     if dhdr.get(f) != mhdr.get(f)]
+            if not diffs:
+                return  # 内存 == 磁盘: 干净(结构豁免, 永不误报)
+            _hollow_enforce(tpid, tpath, rec, diffs)
+        finally:
+            try:
+                k32.CloseHandle(ctypes.c_void_p(h))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _hollow_enforce(tpid, tpath, rec, diffs):
+    """铁证处置(与 ABD 一致): 终止注入者链 + 隔离注入者镜像 + 终止被镂空目标 + 通知 + 链报告。"""
+    try:
+        wpid = int(rec.get('writer_pid') or 0)
+        wname = rec.get('writer_name') or 'Unknown.exe'
+        wpath = rec.get('writer_path') or ''
+        det = '; '.join('{}: disk={} mem={}'.format(f, a, b) for f, a, b in diffs[:6])
+        chain_desc = ''
+        killed = False
+        rm = getattr(_g_hollow_parent, '_realtime_monitor', None) if _g_hollow_parent else None
+        if wpid > 0 and rm:
+            try:
+                chain = rm._terminate_chain(wpid, wname or os.path.basename(tpath) or 'unknown',
+                                            wpath or '', full=True)
+                chain_desc = ' -> '.join('{}({})'.format(n, p) for n, p, _tp, _ta in chain) or wname
+                killed = bool(chain)
+            except Exception:
+                pass
+        tkill = False
+        try:  # 被镂空目标本体: 内存已是攻击者代码, 终止单体(不动其无辜父链)
+            k32 = ctypes.windll.kernel32
+            ht = k32.OpenProcess(0x0001, False, tpid)
+            if ht:
+                tkill = bool(k32.TerminateProcess(ctypes.c_void_p(ht), 0))
+                k32.CloseHandle(ctypes.c_void_p(ht))
+        except Exception:
+            pass
+        quarantined = ''
+        wp = os.path.normcase(wpath or '')
+        if wpath and wp.endswith(_ABD_PE_EXTS) and not _abd_excluded(wp):
+            q = _quarantine_file(wpath, 'Process Hollowing injector')
+            quarantined = q or ''
+            if q:
+                _tag_threat_path(wpath, 'Hollow-Injector')
+        _log('ABD:PEB.Hollowing(GenRule:T1055.012) {}({}) 内存PE头!=磁盘[{}] | 注入者 {}({}) {}'.format(
+            os.path.basename(tpath) or '?', tpid, det[:110], wname, wpid,
+            '已终止链' if killed else ('已终止目标' if tkill else '已标记')))
+        _scan_log('ABD:PEB.Hollowing(GenRule:T1055.012) {}({}) <- {}({})'.format(
+            os.path.basename(tpath) or '?', tpid, wname, wpid))
+        _record_interception('主防-进程镂空', wname or os.path.basename(tpath) or 'Unknown.exe',
+                             wpath or tpath, threat_type='process_hollowing',
+                             confidence=95, engine='HollowGuard取证',
+                             action='terminated' if (killed or tkill) else 'detected',
+                             extra='目标:{}({}) 注入者:{}({}) 链:{} 隔离:{}'.format(
+                                 os.path.basename(tpath), tpid, wname, wpid,
+                                 chain_desc[:80], quarantined))
+        _edr_add_event(wpid or tpid, wname or 'Unknown.exe', wpath or tpath, 'hollowing', 30,
+                       'Process hollowing evidence: {}'.format(det[:150]))
+        _edr_report_chain(wpid or tpid, wname or 'Unknown.exe', wpath or tpath,
+                          [('Hollowing evidence: {}'.format(det), 30)], action='blocked')
+        _notify('Threat Blocked', 'Process Hollowing blocked: {}'.format(
+                    wname or os.path.basename(tpath)),
+                pid=wpid or tpid, name=wname or os.path.basename(tpath), path=wpath or tpath)
+    except Exception:
+        pass
 
 def _abd_note_created(pid, target):
     """filecreate 遥测挂钩: 记录新建文件及其创建者链(安装器/编译器产出, 排除出感染目标集)。"""
@@ -1192,6 +1548,112 @@ def _edr_enforce_chain(pid):
     except Exception:
         pass
 
+# ============================ 释放台账 + 恶意判决回溯处置(方案1+2) ============================
+# 缺口(用户点破): 释放动作在扫描判不出恶意时"什么都不发生" -> dropper 投放后继续作恶;
+# 判毒滞后的文件日后被判恶意时, 没有"谁释放的 -> 回头处置"机制。
+# 方案1(台账+回溯): 每个新落盘 PE 记 (路径,时间,归因进程尽力) 24h; 任何文件被判恶意
+#   隔离(_quarantine_file 汇聚点) -> 回查台账 -> 处置释放者: 威胁标签循环击杀 + 终止现存实例。
+#   dropper 跑了也逃不掉: 其镜像一旦再次出现即被击杀。
+# 方案2(释放者计分): 归因成功的释放 -> dropper 行为分(可疑目录+10/其他+5) 入 EDR 账本,
+#   与危险命令/持久化/注入等信号 IOA 共振 —— 单次"无害"操作被跨时间累计吸收。
+_g_drop_ledger = {}          # path_norm -> dict(ts, pid, name, ppath)
+_g_drop_ledger_lock = threading.Lock()
+_g_retro_handled = {}        # dropper_path -> ts 回溯处置幂等(10min)
+_SYS_GENERATED_FILES_L = None
+
+def _drop_ledger_register(filepath, pid=0, name='', ppath=''):
+    """释放台账登记: 新落盘 PE 均记录(归因尽力), 24h 滚动保留。"""
+    try:
+        if not filepath or ':\\' not in filepath:
+            return
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext not in ('.exe', '.dll', '.sys', '.scr', '.com', '.ocx', '.cpl', '.msi'):
+            return
+        global _SYS_GENERATED_FILES_L
+        if _SYS_GENERATED_FILES_L is None:
+            _SYS_GENERATED_FILES_L = {f.lower() for f in _SYS_GENERATED_FILES}
+        pl = os.path.normcase(os.path.abspath(filepath))
+        if _is_sys_generated_file(pl):
+            return
+        now = time.time()
+        with _g_drop_ledger_lock:
+            _g_drop_ledger[pl] = dict(ts=now, pid=int(pid or 0),
+                                      name=str(name or ''), ppath=str(ppath or ''))
+            if len(_g_drop_ledger) > 5000:
+                for k in [k for k, v in _g_drop_ledger.items() if now - v['ts'] > 86400][:2500]:
+                    _g_drop_ledger.pop(k, None)
+    except Exception:
+        pass
+
+def _drop_ledger_dropper_of(filepath):
+    """查释放者: 精确路径优先, 否则同目录最新一条(同批释放归并)。"""
+    try:
+        pl = os.path.normcase(os.path.abspath(str(filepath or '')))
+        now = time.time()
+        with _g_drop_ledger_lock:
+            ent = _g_drop_ledger.get(pl)
+            if ent and ent.get('pid'):
+                return dict(ent)
+            d = os.path.dirname(pl)
+            best = None
+            for k, v in _g_drop_ledger.items():
+                if v.get('pid') and os.path.dirname(k) == d and now - v['ts'] < 86400:
+                    if best is None or v['ts'] > best['ts']:
+                        best = v
+            return dict(best) if best else None
+    except Exception:
+        return None
+
+def _retro_drop_recheck(filepath):
+    """回溯处置钩子(挂 _quarantine_file): 任何文件被判恶意隔离时, 回查释放台账处置释放者:
+    威胁标签(循环击杀, 镜像再现即杀) + 终止现存实例 + 拦截记录 + 通知。"""
+    try:
+        dropper = _drop_ledger_dropper_of(filepath)
+        if not dropper:
+            return
+        pid = int(dropper.get('pid') or 0)
+        if pid <= 4:
+            return
+        name = dropper.get('name') or ''
+        ppath = dropper.get('ppath') or ''
+        now = time.time()
+        with _g_drop_ledger_lock:
+            if now - _g_retro_handled.get(ppath.lower() or str(pid), 0) < 600:
+                return
+            _g_retro_handled[ppath.lower() or str(pid)] = now
+        if _is_own_chain_pid(pid):
+            return   # 自家链绝不处置
+        if ppath and is_system_path(ppath):
+            return   # 系统组件绝不处置
+        _tag_threat_path(ppath or (name or 'Dropper'), 'Drop-Retro')
+        killed = False
+        chain_desc = ''
+        rm = getattr(g_window, '_realtime_monitor', None) if g_window else None
+        if rm:
+            try:
+                chain = rm._terminate_chain(pid, name or 'unknown', ppath or '', full=True)
+                chain_desc = ' -> '.join('{}({})'.format(n, p) for n, p, _t, _a in chain) or name
+                killed = bool(chain)
+            except Exception:
+                pass
+        _log("[回溯处置] {}({}) 释放的 {} 已被判恶意 —— 释放者{}, 链:{}".format(
+            name or '?', pid, os.path.basename(filepath),
+            '已终止' if killed else '已标记循环击杀', chain_desc[:80]))
+        _record_interception('回溯处置(释放者追杀)', name or 'Unknown.exe', ppath or '',
+                             threat_type='Dropper Retro', confidence=85, engine='释放台账',
+                             action='terminated' if killed else 'tagged',
+                             extra='释放文件:{}({}) 链:{}'.format(os.path.basename(filepath),
+                                 time.strftime('%H:%M:%S', time.localtime(dropper.get('ts', now))),
+                                 chain_desc[:70]))
+        _edr_add_event(pid, name or 'Unknown.exe', ppath or '', 'mal_drop', 20,
+                       'Retro: dropper of later-flagged {}'.format(os.path.basename(filepath)))
+        _notify("Threat Blocked",
+                "Dropper tracked: {} released {}".format(name or 'Unknown.exe',
+                                                         os.path.basename(filepath)),
+                pid=pid, name=name or 'Unknown.exe', path=ppath)
+    except Exception:
+        pass
+
 def _quarantine_file(orig_path, threat=''):
     """隔离文件到 QUARANTINE_DIR 并写入 <dest>.meta.json(记录原始路径/时间/威胁类型)。
     隔离而非删除; 原路径自动保存, 供 --quarantinemove 无需选择位置直接还原。"""
@@ -1208,6 +1670,10 @@ def _quarantine_file(orig_path, threat=''):
             with open(dest + ".meta.json", 'w', encoding='utf-8') as f:
                 json.dump({"orig": orig_path, "time": time.strftime('%Y-%m-%d %H:%M:%S'),
                            "threat": str(threat)[:120]}, f, ensure_ascii=False)
+        except Exception:
+            pass
+        try:
+            _retro_drop_recheck(orig_path)   # 释放台账回溯: 文件判恶意隔离 -> 追杀释放者
         except Exception:
             pass
         return dest
@@ -1727,8 +2193,8 @@ _LINE_DIR = os.path.join(BASE_DIR, 'Line')
 _G_START_TIME = [time.time()]
 # 设置页强制开启的键(与UI开关一致), 控制台同样不允许关闭
 _CONSOLE_FORCED_ON = {'realtime_protect'}
-# 控制台可设置的模型选项(默认 Xdows Flash)
-_CONSOLE_MODEL_OPTIONS = ('xdows-flash', 'xdows-standard', 'xdows-pro', 'xdows-adaptive', 'tanka2', 'seven')
+# 控制台可设置的模型选项(默认 SevenEngine V3 Flash)
+_CONSOLE_MODEL_OPTIONS = ('seven-v3-flash', 'xdows-flash', 'xdows-standard', 'xdows-pro', 'xdows-adaptive', 'tanka2', 'seven')
 
 def _console_list_chains(limit=30):
     """Line/ 下攻击链报告(最新在前)。"""
@@ -2837,23 +3303,58 @@ class _Tanka2ScanWorker:
                 return ("MALICIOUS|Tanka2", max(score, 60), "Tanka2")
             return ("CLEAN", score, "Tanka2")
 
+# ===== SevenEngine V3 Flash(改名后原生无窗口引擎, Model\\SevenML.onnx) 2并发单发Worker =====
+_V3FLASH_CONCURRENCY = 2
+
+class _V3FlashScanWorker:
+    """SevenEngine V3 Flash(无窗口原生 exe):
+    每次扫描单发 [SevenEngine.exe <path>](CREATE_NO_WINDOW 无窗口), 最多 2 并发
+    (BoundedSemaphore: 实时链路/手动扫描/后台扫描并行, 第三路排队);
+    回流信息解析见 _parse_engine_output(V3 Return:/Score: 与新版括号行双协议)。
+    返回 (res, conf, vt): CLEAN / MALICIOUS|Gen.Malware / ERROR。"""
+    def __init__(self):
+        self._slots = threading.BoundedSemaphore(_V3FLASH_CONCURRENCY)
+        self._ready = True      # 无常驻进程, 始终可用
+        self._proc = None
+
+    def _kill(self):
+        self._proc = None
+
+    def _ensure(self):
+        return True
+
+    def scan(self, filepath, quick=False, timeout=120):
+        if not os.path.exists(SEVENGINE_EXE):
+            _log("[V3Flash] 引擎不存在: {}".format(SEVENGINE_EXE))
+            return ("ERROR", 0, "")
+        if not self._slots.acquire(timeout=timeout):
+            return ("ERROR", 0, "")
+        try:
+            return _exe_scan_file(filepath)
+        finally:
+            self._slots.release()
+
 class _ScanWorkerFacade:
-    """按 scan_model 设置在 Xdows / Tanka2 / SevenEngine Worker 间路由(同接口 facade)。
-    默认 xdows-flash; 切换设置时杀掉旧后端, 下次扫描自动拉起新后端。"""
+    """按 scan_model 设置在 Xdows / Tanka2 / SevenEngine V3 Flash Worker 间路由(同接口 facade)。
+    'seven-v3-flash'(默认)/'seven' -> V3Flash 无窗口 2 并发单发引擎; 切换设置时杀掉旧后端, 下次扫描自动拉起新后端。
+    旧 'seven' 在代码模式且 SevenEngine.py 存在时仍走常驻 Worker(保留旧路径)。"""
     def __init__(self):
         self._xdows = _XdowsScanWorker()
         self._tanka = _Tanka2ScanWorker()
         self._seven = _ResidentScanWorker()
+        self._v3flash = _V3FlashScanWorker()
         self._kind = None
 
     def _active(self):
-        m = str(g_settings.get('scan_model', 'xdows-flash')).lower()
+        m = str(g_settings.get('scan_model', 'seven-v3-flash')).lower()
         if m.startswith('xdows'):
             kind = 'xdows'
         elif m == 'tanka2':
             kind = 'tanka2'
-        else:
+        elif m.startswith('seven') and (not _engine_use_exe()) and _engine_v3_available():
             kind = 'seven'
+        else:
+            kind = 'v3flash'
         if kind != self._kind:
             if self._kind is not None:
                 try:
@@ -2861,11 +3362,11 @@ class _ScanWorkerFacade:
                 except Exception:
                     pass
             self._kind = kind
-        return {'xdows': self._xdows, 'tanka2': self._tanka, 'seven': self._seven}[kind]
+        return {'xdows': self._xdows, 'tanka2': self._tanka, 'seven': self._seven, 'v3flash': self._v3flash}[kind]
 
     def _kill_kind(self, kind):
         try:
-            {'xdows': self._xdows, 'tanka2': self._tanka, 'seven': self._seven}[kind]._kill()
+            {'xdows': self._xdows, 'tanka2': self._tanka, 'seven': self._seven, 'v3flash': self._v3flash}[kind]._kill()
         except Exception:
             pass
 
@@ -2881,7 +3382,7 @@ class _ScanWorkerFacade:
         return self._active()._ensure()
 
     def _kill(self):
-        for w in (self._xdows, self._tanka, self._seven):
+        for w in (self._xdows, self._tanka, self._seven, self._v3flash):
             try:
                 w._kill()
             except Exception:
@@ -2890,7 +3391,7 @@ class _ScanWorkerFacade:
     def scan(self, filepath, quick=False, timeout=60):
         return self._active().scan(filepath, quick=quick, timeout=timeout)
 
-_SCAN_WORKER = _ScanWorkerFacade()      # 唯一常驻扫描Worker facade: 默认 Xdows Model(Flash), 可在控制台切换
+_SCAN_WORKER = _ScanWorkerFacade()      # 唯一常驻扫描Worker facade: 默认 SevenEngine V3 Flash(无窗口2并发), 可在控制台切换
 
 # 单Worker常驻: 引擎为Python实现, 每个Worker进程都要独立预热(解压+加载模型~1.5s)且各占进程/内存;
 # V3引擎18ms/文件, 单Worker串行吞吐足够(≈55文件/s), 全部扫描共用一个常驻Worker,
@@ -3099,6 +3600,28 @@ def classify_threat(filepath, rule_name=None, pe_apis=None, heuristic=False):
     variant = _gen_variant(filepath + family)
     prefix = 'HEUR:' if is_heur else ''
     return f'{prefix}{threat_type}.{platform}.{family}.{variant}'
+
+_SYS_GENERATED_FILES = {'pagefile.sys', 'swapfile.sys', 'hiberfil.sys'}
+
+def _is_sys_generated_file(file_path):
+    """系统自生成文件(页面文件/休眠文件/崩溃转储/Windows树) —— 绝不进驱动释放/落盘拦截管线。
+    (pagefile.sys 曾被误判驱动释放并误杀归因进程, 2026-11-01)"""
+    try:
+        pl = os.path.normcase(os.path.abspath(str(file_path or '')))
+        if os.path.basename(pl) in _SYS_GENERATED_FILES or pl.endswith('.dmp'):
+            return True
+        windir = os.path.normcase(os.environ.get('SystemRoot', 'C:\\Windows'))
+        return pl.startswith(windir + os.sep)
+    except Exception:
+        return False
+
+def _is_root_dir_path(file_path):
+    """路径是否位于盘根(如 C:\\x.sys): 目录前缀归因无价值, 拒绝归因。"""
+    try:
+        d = os.path.dirname(os.path.normcase(os.path.abspath(str(file_path or ''))))
+        return len(d) <= 3   # 'c:\\'
+    except Exception:
+        return False
 
 def is_system_path(file_path):
     norm = os.path.normpath(file_path).lower().replace('\\', '/')
@@ -3640,9 +4163,68 @@ class _StudyProxy:
                 })
         return out
 
+def _parse_engine_output(stdout):
+    """解析 SevenEngine 引擎回流信息(V3 Flash exe / 旧 exe 兼容), 返回 (res, conf, vt)。
+    支持三种协议行:
+      V3:  Return:ML:Gen.Malware / Return:ML:Clean + Score:99
+      新版括号行: [Malware] path | Score:99 / [Clean] path | Score:x / [Error] path | Score:None
+      V2:  Result: / Confidence: / Info:"""
+    res, conf, vt = "CLEAN", 0, ""
+    seen_v3 = False
+    for _ln in (stdout or '').splitlines():
+        _ln = _ln.strip()
+        if _ln.startswith('Return:'):
+            seen_v3 = True
+            _r = _ln[len('Return:'):].strip()
+            if _r.upper().startswith('ML:'):
+                _v = _r[3:].strip()
+                if _v.lower() == 'clean':
+                    res = "CLEAN"
+                else:
+                    res = "MALICIOUS|{}".format(_v)
+                    vt = "ML:{}".format(_v)
+            else:
+                res = "ERROR"
+        elif _ln.startswith('Score:'):
+            try:
+                conf = int(_ln[len('Score:'):].strip())
+            except ValueError:
+                conf = 0
+        elif _ln.startswith('[Malware]') or _ln.startswith('[Clean]') or _ln.startswith('[Error]'):
+            seen_v3 = True
+            if _ln.startswith('[Malware]'):
+                res = "MALICIOUS|Gen.Malware"
+                vt = "V3Flash"
+            elif _ln.startswith('[Clean]'):
+                res = "CLEAN"
+                vt = "V3Flash"
+            else:
+                res = "ERROR"
+            m2 = re.search(r'Score:(\d+)', _ln)
+            conf = int(m2.group(1)) if m2 else 0
+        elif _ln.startswith('Result:'):
+            res = _ln[len('Result:'):].strip()
+        elif _ln.startswith('Confidence:'):
+            try:
+                conf = int(_ln[len('Confidence:'):].strip() or 0)
+            except ValueError:
+                conf = 0
+        elif _ln.startswith('Info:'):
+            vt = _ln[len('Info:'):].strip()
+    if seen_v3:
+        if res.startswith("MALICIOUS") and conf <= 0:
+            conf = 60
+        return res, conf, vt
+    if conf <= 0 and res.startswith('MALICIOUS'):
+        try:
+            conf = int(res.rsplit('|', 1)[1])
+        except Exception:
+            conf = 60
+    return res, conf, vt
+
 def _exe_scan_file(filepath):
-    """通过打包好的 SevenEngine.exe(CLI 模式)扫描单个文件, 返回 (res, conf, vt)。
-    兼容 V3(Return:ML:Gen.Malware / Score:99)与 V2(Result:/Confidence:/Info:)两种输出。"""
+    """通过打包好的 SevenEngine.exe(CLI 模式, 无窗口)扫描单个文件, 返回 (res, conf, vt)。
+    回流解析见 _parse_engine_output(V3 / V3 Flash 括号行 / V2 兼容)。"""
     try:
         _env = dict(os.environ)
         _env['PYTHONIOENCODING'] = 'utf-8'
@@ -3652,46 +4234,7 @@ def _exe_scan_file(filepath):
             text=True, encoding='utf-8', errors='replace',
             timeout=120, env=_env, cwd=BASE_DIR,
             creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-        res, conf, vt = "CLEAN", 0, ""
-        seen_v3 = False
-        for _ln in (proc.stdout or '').splitlines():
-            _ln = _ln.strip()
-            if _ln.startswith('Return:'):
-                seen_v3 = True
-                _r = _ln[len('Return:'):].strip()
-                if _r.upper().startswith('ML:'):
-                    _v = _r[3:].strip()
-                    if _v.lower() == 'clean':
-                        res = "CLEAN"
-                    else:
-                        res = "MALICIOUS|{}".format(_v)
-                        vt = "ML:{}".format(_v)
-                else:
-                    res = "ERROR"
-            elif _ln.startswith('Score:'):
-                try:
-                    conf = int(_ln[len('Score:'):].strip())
-                except ValueError:
-                    conf = 0
-            elif _ln.startswith('Result:'):
-                res = _ln[len('Result:'):].strip()
-            elif _ln.startswith('Confidence:'):
-                try:
-                    conf = int(_ln[len('Confidence:'):].strip() or 0)
-                except ValueError:
-                    conf = 0
-            elif _ln.startswith('Info:'):
-                vt = _ln[len('Info:'):].strip()
-        if seen_v3:
-            if res.startswith("MALICIOUS") and conf <= 0:
-                conf = 60
-            return res, conf, vt
-        if conf <= 0 and res.startswith('MALICIOUS'):
-            try:
-                conf = int(res.rsplit('|', 1)[1])
-            except Exception:
-                conf = 60
-        return res, conf, vt
+        return _parse_engine_output(proc.stdout)
     except Exception as e:
         _log("[扫描引擎] exe 调用失败: {}".format(e))
         return "ERROR", 0, ""
@@ -3899,7 +4442,7 @@ g_settings = {
     "etw_telemetry": True,          # 遥测拦截(端点规则):默认启动,轻量轮询采集+按Rules端点规则拦截(命中即拦)
     "wsc_takeover": True,           # 安全中心接管: 全自动, 启动即向WSC注册本产品接管Defender(无UI开关)
     "DefenseMode": False,           # DefenseMode: True时不做进程扫描/进程拦截(放行所有进程), 保留主动防御+文件防护(落盘/注册表等照常拦)
-    "scan_model": "tanka2",         # 扫描模型默认: tanka2|xdows-flash|xdows-standard|xdows-pro|xdows-adaptive|seven —— DefenseMode开关均使用
+    "scan_model": "seven-v3-flash", # 扫描模型默认: seven-v3-flash|tanka2|xdows-flash|xdows-standard|xdows-pro|xdows-adaptive|seven —— DefenseMode开关均使用
 }
 
 # ============================ 轻量行为EDR配置 ============================
@@ -6374,6 +6917,26 @@ class FileMonitor:
                                o=list(ops), pn=proc_name, pp=proc_pid, ppath=proc_path,
                                rw=ransomware, so=score_only:
                                self._show_dialog(c, cr, d, m, r, f, o, pn, pp, ppath, rw, so))
+            elif msg.get("type") == "drop_attribution":
+                # 方案1+2: file-monitor 释放归因(方案1同步归因结果) -> 台账登记 + dropper 计分
+                _da_path = msg.get("path") or ''
+                _da_pid = int(msg.get("pid") or 0)
+                _da_name = msg.get("name") or ''
+                _da_ppath = msg.get("ppath") or ''
+                if _da_path:
+                    _drop_ledger_register(_da_path, _da_pid, _da_name, _da_ppath)
+                    if _da_pid and not _is_own_chain_pid(_da_pid) and _da_ppath \
+                            and not is_system_path(_da_ppath):
+                        _susp = any(d in _da_path.lower() for d in
+                                    ('\\appdata\\', '\\temp\\', '\\tmp\\', '\\programdata\\',
+                                     '\\users\\public\\', '\\downloads\\', '\\desktop\\',
+                                     '\\recycle\\'))
+                        _edr_add_event(_da_pid, _da_name or 'Unknown.exe', _da_ppath, 'dropper',
+                                       10 if _susp else 5,
+                                       'Dropped executable: {}'.format(_da_path))
+                        _endpoint_log("DROPPER-SCORE {}({}) -> {} ({}分, 可疑目录={})".format(
+                            _da_name or 'Unknown.exe', _da_pid, _da_path,
+                            10 if _susp else 5, _susp))
             elif msg.get("type") == "rollback_result":
                 self._rollback_count = msg.get("count", 0)
                 self._rollback_failed = msg.get("failed", 0)
@@ -6833,6 +7396,14 @@ class LightTelemetryMonitor:
             if pid <= 0 or pid == self._self_pid:
                 return
             cmdline = self._proc_cmdline(pid, name)
+            # v3 additive (existing endpoint-rule dispatch below is unchanged): feed the full
+            # cmdline to SevenAgent ProcessCmdline rules as a 2nd detection source.
+            try:
+                _sa = globals().get('_g_seven_agent')
+                if _sa is not None and cmdline:
+                    _sa.match_cmdline(pid, name, path or name, cmdline, ppid)
+            except Exception:
+                pass
             self._dispatch('processcreate', pid, ppid, path or name, ppath or '',
                            'cmd: ' + cmdline if cmdline else '')
         except Exception:
@@ -6844,6 +7415,14 @@ class LightTelemetryMonitor:
                 # 双通道去重: 同一pid 60s内只入账/匹配一次(快速回调先到, 轮询后到)
                 now0 = time.time()
                 if now0 - self._create_seen.get(int(pid), 0) < 60:
+                    return
+                # 方案A修复(危险命令行拦截失效): 快速通道在进程创建瞬间读命令行,
+                # PEB未就绪读到乱码被 _cmdline_plausible 丢弃 -> detail 为空;
+                # 空命令行事件若占用去重名额, 2s轮询兜底通道(能读到完整命令行)
+                # 会被60s去重挡掉 -> 命令行分类/危险命令检查永不触发。
+                # 故: 空命令行且无规则命中 -> 不占去重名额不入空账, 留给轮询通道
+                # 带完整命令行重新入账; 有规则命中照旧即时匹配(毫秒级拦截不受影响)。
+                if not (detail or '').strip() and not self._match_event(kind, target, proc, detail):
                     return
                 self._create_seen[int(pid)] = now0
                 if len(self._create_seen) > 2000:
@@ -7724,6 +8303,7 @@ class MemoryGuard:
         self._stop.clear()
         self._thr = threading.Thread(target=self._loop, daemon=True, name='MemoryGuard')
         self._thr.start()
+        _hollow_worker_start(self._parent)   # 镂空取证 worker(惰性, 只启一次)
         _log("[内存防护] MemoryGuard 已启动(句柄表轮询: LSASS/注入检测)")
         _endpoint_log("MemoryGuard started")
 
@@ -7918,13 +8498,19 @@ class MemoryGuard:
         SUSP_MASK = 0x32
         owner_proc_h = {}  # owner_pid -> dup handle 句柄缓存(本轮)
         owner_ok = {}      # owner_pid -> 是否通过结构性豁免(True/False)
+        # 临时诊断(排查镂空触发链): 每关卡计数, 30s 节流输出一条
+        _diag = dict(entries=len(entries), proc=0, susp=0, selfp=0, sysown=0,
+                     openfail=0, dupfail=0, selftgt=0, child=0, sameexe=0, inj=0, lsass=0)
         try:
             for pid, h, acc, ti in entries:
                 if ti != self._proc_type_idx or not h:
                     continue
+                _diag['proc'] += 1
                 if not (acc & SUSP_MASK):
                     continue
+                _diag['susp'] += 1
                 if pid == self_pid:
+                    _diag['selfp'] += 1
                     continue  # 自家监控进程的句柄不算(主防开进程句柄是正常工作)
                 # 结构性豁免(不看名字): owner 是否系统目录归属
                 verdict = owner_ok.get(pid)
@@ -7934,6 +8520,7 @@ class MemoryGuard:
                     verdict = not (opath0 and self._is_system_path(opath0))
                     owner_ok[pid] = verdict
                 if not verdict:
+                    _diag['sysown'] += 1
                     continue
                 oname = names.get(pid, '')
                 # 打开 owner(DUPLICATE 权限) -> 复制该句柄 -> GetProcessId 识别目标
@@ -7942,6 +8529,7 @@ class MemoryGuard:
                     oh = k32.OpenProcess(0x0040, False, pid)  # PROCESS_DUP_HANDLE
                     if not oh:
                         owner_proc_h[pid] = False
+                        _diag['openfail'] += 1
                         continue
                     owner_proc_h[pid] = oh
                 if not oh:
@@ -7949,6 +8537,7 @@ class MemoryGuard:
                 dup = ctypes.c_void_p()
                 if not k32.DuplicateHandle(ctypes.c_void_p(oh), ctypes.c_void_p(h), h_cur,
                                            ctypes.byref(dup), 0, False, 2):
+                    _diag['dupfail'] += 1
                     continue
                 tpid = 0
                 try:
@@ -7956,11 +8545,13 @@ class MemoryGuard:
                 finally:
                     k32.CloseHandle(dup)
                 if tpid in (0, pid):
+                    _diag['selftgt'] += 1
                     continue  # 指向自己/无效: 正常
                 tname = names.get(tpid, '')
                 # ---- LSASS/关键系统进程访问 ----
                 if tname in self._CRITICAL_TARGETS and (acc & (self._VM_READ | self._VM_WRITE)):
                     if self._flag_dedup(pid, tpid):
+                        _diag['lsass'] += 1
                         opath = self._proc_path_cached(pid, k32)
                         _edr_add_event(pid, oname or 'Unknown.exe', opath, 'lsass_access', 15,
                                        'Handle to {} with VM access 0x{:x} (credential access)'.format(tname, acc))
@@ -7974,13 +8565,16 @@ class MemoryGuard:
                     # 结构性豁免(不看名称, 伪装名称无法绕过):
                     # 1) 父->子 / 子->父: 进程创建时自然持有句柄(crashpad/webview2/子进程继承)
                     if parents.get(tpid) == pid or parents.get(pid) == tpid:
+                        _diag['child'] += 1
                         continue
                     # 2) 同一exe文件路径(浏览器/IDE多进程协作, 比对路径而非名称)
                     opath = self._proc_path_cached(pid, k32)
                     tpath = self._proc_path_cached(tpid, k32)
                     if opath and tpath and os.path.normcase(opath) == os.path.normcase(tpath):
+                        _diag['sameexe'] += 1
                         continue
                     if self._flag_dedup(pid, tpid):
+                        _diag['inj'] += 1
                         # 行为打分: 持有VM写/远程线程句柄 = 注入观察信号(+5),
                         # 与链上其他行为(落盘/违规/脚本/LSASS)累积达判决线;
                         # 单凭句柄不直接拦截(crashpad/webview2等合法持有者零误杀)
@@ -7989,7 +8583,13 @@ class MemoryGuard:
                                            tname, tpid, acc))
                         _endpoint_log("INJECTION-TELEMETRY owner={}({}) -> {}({}) acc=0x{:x} (+5 观察)".format(
                             oname, pid, tname, tpid, acc))
+                        # 镂空防护挂钩: 目标被非父子/非同exe进程持 VM 写句柄 -> 队列延迟内存取证
+                        _hollow_note_target(tpid, tname, pid, oname, opath or '')
         finally:
+            now = time.time()
+            if _diag['proc'] and now - getattr(self, '_diag_ts', 0) > 30:
+                self._diag_ts = now
+                _endpoint_log("HSCAN-DIAG " + " ".join("{}={}".format(k, v) for k, v in _diag.items()))
             for oh in owner_proc_h.values():
                 if oh:
                     try:
@@ -9206,6 +9806,8 @@ class RealtimeMonitor:
             return result
         def _find_parent_process(filepath):
             try:
+                if _is_root_dir_path(filepath):
+                    return None   # 盘根落盘(如 C:\pagefile.sys): 前缀归因无价值, 拒绝归因(曾误杀 pyw.exe)
                 file_dir = os.path.dirname(filepath).lower()
                 procs = self._enum_processes()
                 candidates = []
@@ -9233,71 +9835,70 @@ class RealtimeMonitor:
         def _ask_driver_install(filepath):
             fkey = filepath.lower()
             if fkey in _driver_asked:
-                return 'block'
+                return 'log'
             _driver_asked.add(fkey)
             fname = os.path.basename(filepath)
-            _log(f"[拦截-文件] 检测到驱动文件释放: {fname} ({filepath})")
-            action = 'block'   # 托盘模式: 驱动释放直接拦截(+15分), 不再弹窗询问
-            parent = _find_parent_process(filepath)
-            parent_info = ''
-            if parent:
-                ppid, pname, ppath, _ = parent
-                parent_info = f'来源进程: {pname}(PID:{ppid}) {ppath}'
-                _record_behavior(ppid, pname, ppath, 0, '释放驱动', filepath)
-                _edr_add_event(ppid, pname, ppath, 'driver_drop', 15,
-                               'Dropped driver file: {}'.format(filepath))
-            _record_interception('敏感操作(驱动安装)', fname, filepath, threat_type='Driver Drop', action='blocked', extra=f'已阻止 {parent_info}')
-            # 驱动判毒: 威胁 -> 隔离(不删除) + Threat Quarantined; 干净 -> 拦截 + 隔离
-            verdict, _vt = "CLEAN", ""
+            _drop_ledger_register(filepath)   # 释放台账: .sys 落盘也登记(归因后更新)
+            # 先扫描判毒, 确认恶意才拦截/终止(用户指定: 扫描后确认恶意再拦, 不暂停不提前终止)
+            verdict, _vc, _vt = "CLEAN", 0, ""
             try:
                 if g_scanner:
                     verdict, _vc, _vt = g_scanner.scan_file(filepath)
             except Exception:
                 verdict = "CLEAN"
+            if not verdict.startswith("MALICIOUS"):
+                # 干净/白名单: 不拦截不终止只留痕(pagefile.sys 类误报根治于此)
+                _log(f"[拦截-文件] 驱动落盘扫描 CLEAN 放行: {fname} ({filepath})")
+                return 'log'
+            parent = _find_parent_process(filepath)
+            if parent:
+                _drop_ledger_register(filepath, parent[0], parent[1], parent[2])  # 台账归因更新
+            _log(f"[拦截-文件] 检测到恶意驱动文件释放: {fname} ({filepath}) [{_vt}]")
+            parent = _find_parent_process(filepath)
+            parent_info = ''
+            if parent:
+                ppid, pname, ppath, _ = parent
+                parent_info = f'来源进程: {pname}(PID:{ppid}) {ppath}'
+                _record_behavior(ppid, pname, ppath, 0, '释放恶意驱动', filepath)
+                _edr_add_event(ppid, pname, ppath, 'driver_drop', 15,
+                               'Dropped malicious driver: {}'.format(filepath))
+            _record_interception('敏感操作(驱动安装)', fname, filepath, threat_type='Driver Drop',
+                                 action='blocked', extra=f'恶意驱动已拦截 {parent_info}')
             _quar_ok = False
-            if verdict.startswith("MALICIOUS"):
-                dest = _quarantine_file(filepath, _vt or 'Driver Threat')
-                if dest:
-                    _quar_ok = True
-                    _notify("Threat Quarantined", "Threat Quarantined {}".format(fname),
-                            name=fname, path=filepath)
-                    _log(f"[拦截-文件] 驱动判毒隔离: {fname} [{_vt}]")
-                else:
-                    _log(f"[拦截-文件] 驱动隔离失败: {fname}")
+            dest = _quarantine_file(filepath, _vt or 'Driver Threat')
+            if dest:
+                _quar_ok = True
+                _log(f"[拦截-文件] 恶意驱动判毒隔离: {fname} [{_vt}]")
             else:
-                _qdest = _quarantine_file(filepath, 'Driver Drop')
-                if _qdest:
-                    _quar_ok = True
-                    _log(f"[拦截-文件] 驱动释放已拦截并隔离: {fname}")
-                    _notify("Threat Quarantined", "Threat Quarantined {}".format(fname),
-                            name=fname, path=filepath)
-                else:
-                    try:
-                        os.remove(filepath)
-                        _log(f"[拦截-文件] 驱动释放已拦截并删除(隔离失败): {fname}")
-                    except Exception:
-                        _log(f"[拦截-文件] 驱动释放删除失败: {fname}")
-                    _notify("Threat Blocked", "Threat Blocked {}".format(fname),
-                            name=fname, path=filepath)
+                try:
+                    os.remove(filepath)
+                    _log(f"[拦截-文件] 恶意驱动隔离失败已删除: {fname}")
+                except Exception:
+                    _log(f"[拦截-文件] 恶意驱动隔离失败: {fname}")
+            _notify("Threat Quarantined" if _quar_ok else "Threat Blocked",
+                    "{} {}".format("Threat Quarantined" if _quar_ok else "Threat Blocked", fname),
+                    name=fname, path=filepath)
             if parent:
                 ppid, pname, ppath, _ = parent
                 _ok, _acc = self._terminate_process(ppid)
                 if _ok:
-                    _log(f"[拦截-进程] 终止驱动释放进程: {pname}({ppid}) 权限:0x{_acc:04x}")
-                    # 通知已由上方判毒分支发出, 此处不重复
-                    _edr_report_chain(ppid, pname, ppath,
-                                      [('Dropped driver file: {}'.format(fname), 15),
-                                       ('Driver install blocked, file quarantined' if _quar_ok
-                                        else 'Driver install blocked + source terminated', 10)],
-                                      action='quarantined' if _quar_ok else 'blocked')
-            elif _quar_ok:
+                    _log(f"[拦截-进程] 终止恶意驱动释放进程: {pname}({ppid}) 权限:0x{_acc:04x}")
+                _edr_report_chain(ppid, pname, ppath,
+                                  [('Dropped malicious driver: {}'.format(fname), 15),
+                                   ('Malicious driver quarantined' if _quar_ok
+                                    else 'Malicious driver quarantine failed, removed', 10)],
+                                  action='quarantined' if _quar_ok else 'blocked')
+            else:
                 _edr_report_chain(0, fname, filepath,
-                                  [('Dropped driver file: {}'.format(fname), 15),
-                                   ('Driver drop quarantined', 10)],
+                                  [('Dropped malicious driver: {}'.format(fname), 15),
+                                   ('Malicious driver quarantined', 10)],
                                   action='quarantined')
             return 'block'
         def _scan_dropped_file(filepath):
             try:
+                # 系统自生成文件绝不进落盘拦截管线(pagefile.sys 曾误判驱动释放并误杀归因进程)
+                if _is_sys_generated_file(filepath):
+                    return
                 # 已安装软件目录硬保护: Programs/Program Files 下的文件绝不扫描/删除(正规软件DLL曾误杀)
                 _fl = filepath.lower()
                 if '\\programs\\' in _fl or 'program files' in _fl:
@@ -9336,6 +9937,11 @@ class RealtimeMonitor:
                 _record_interception('敏感操作(批量释放)', fname, filepath, threat_type='Mass Drop', action='blocked', extra=f'目录: {parent_dir} 10秒内释放{drop_count}个文件')
                 _record_behavior(0, fname, filepath, 0, '批量释放文件', f'{parent_dir} ({drop_count}个)')
             parent = _find_parent_process(filepath)
+            # 释放台账登记(方案1+2): 无论判毒结果, 落盘 PE 均记录(归因尽力)
+            if parent:
+                _drop_ledger_register(filepath, parent[0], parent[1], parent[2])
+            else:
+                _drop_ledger_register(filepath)
             if parent:
                 ppid, pname, ppath, _ = parent
                 _record_behavior(ppid, pname, ppath, 0, '文件落盘', f'释放: {filepath}')
@@ -12202,11 +12808,10 @@ class SevenEndPointWindow(QWidget):
         threading.Thread(target=_join_worker, daemon=True, name='ProtectStartJoiner').start()
 
     def _show_scan_dialog(self, pid, name, path, monitor, done_event, result_box):
-        """托盘模式: 扫描前阻止通知(Process Scan) -> 后台扫描 -> Process Scanned Released/Blocked。"""
+        """托盘模式: 后台扫描 -> 仅扫描完成后通知(Process Scanned Released/Blocked)。
+        扫描前不再发 Process Scan 预通知(用户要求: 扫描前不通知, 只报扫描结果)。"""
         self._scan_dialog_active = True
         try:
-            _notify("Process Scan", "Suspicious Process Scan {}".format(name))
-
             def _work():
                 res, conf, vt = "ERROR", 0, ""
                 try:
@@ -12481,6 +13086,10 @@ def _on_app_exit(window=None, tray=None):
 
 def _cleanup_on_exit():
     try:
+        _stop_seven_agent()
+    except Exception as e:
+        _log('[SevenAgent] shutdown exception: {}'.format(e))
+    try:
         with open(QUIT_SIGNAL, 'w') as f:
             f.write("quit")
     except:
@@ -12543,6 +13152,7 @@ def main():
     window.hide()   # 纯托盘模式: 不显示任何窗口, 只保留 Qt6 托盘 + 通知
     global g_window
     g_window = window
+    _start_seven_agent(window)
     _setup_tray(app, window)
     _notify("SevenEndPointSecurity", "Realtime protection active")
     app.aboutToQuit.connect(lambda: _cleanup_on_exit())
@@ -12971,6 +13581,22 @@ def _run_file_monitor_mode():
         DLL -> 全部上报主进程做行为判定(与System32/SysWOW64同名系统DLL重复=侧载副本拦截,
         非名单制); 普通DLL由主进程转引擎扫描。"""
         try:
+            # 方案1+2: 释放归因推送 -> 主进程释放台账 + dropper 计分
+            # 归因来源优先级: state(方案1同步归因) -> RM即时反查一次(此刻句柄可能仍开)
+            try:
+                with state_lock:
+                    _attr_pid = int(state.get("proc_pid") or 0)
+                    _attr_name = str(state.get("proc_name") or '')
+                    _attr_ppath = str(state.get("proc_path") or '')
+                if not _attr_pid:
+                    for pid, pname, ppath in _find_proc_using_file(path):
+                        if pid != os.getpid() and ppath and not is_system_path(ppath):
+                            _attr_pid, _attr_name, _attr_ppath = pid, pname, ppath
+                            break
+                _send_worker_msg({"type": "drop_attribution", "path": path,
+                                  "pid": _attr_pid, "name": _attr_name, "ppath": _attr_ppath})
+            except Exception:
+                pass
             _dbg = os.environ.get('_SEP_DBG')
             ext = os.path.splitext(path)[1].lower()
             if _dbg:
@@ -13119,7 +13745,7 @@ def _run_file_monitor_mode():
             dir_match.sort(key=lambda x: x[0], reverse=True)
         return dir_match
 
-    def _try_find_and_store_proc(filepath):
+    def _try_find_and_store_proc(filepath, sync=False):
         with state_lock:
             if state["proc_pid"]:
                 return
@@ -13136,7 +13762,13 @@ def _run_file_monitor_mode():
                         state["proc_pid"] = pid
                         state["proc_path"] = ppath
                     return
-        threading.Thread(target=_do_find, daemon=True).start()
+        if sync:
+            # 方案1同步即时归因: 事件线程内立即反查(RmGetList), 赶在写入者"改完就跑"
+            # 关句柄之前(异步线程调度延迟几十ms正是错过窗口的根因)。仅批内首个事件
+            # 同步执行(几十ms), 后续事件仍异步, 不阻塞 RDCW 事件消费。
+            _do_find()
+        else:
+            threading.Thread(target=_do_find, daemon=True).start()
 
     def _suspend_pid(pid):
         try:
@@ -13426,6 +14058,7 @@ def _run_file_monitor_mode():
                 local_files = []
                 rename_old = None
                 batch_created = set()
+                _batch_sync_used = False   # 方案1: 批内首个归因事件同步执行标记
                 while offset < bytes_returned.value:
                     info = ctypes.cast(ctypes.addressof(buf) + offset,
                                        ctypes.POINTER(_FILE_NOTIFY_INFORMATION)).contents
@@ -13507,7 +14140,9 @@ def _run_file_monitor_mode():
                         with state_lock:
                             _skip_proc = state["rollback_active"] or (state["rollback_end_time"] and (time.time() - state["rollback_end_time"]) < 5.0)
                         if not _skip_proc:
-                            _try_find_and_store_proc(full)
+                            # 方案1: 批内首个归因事件同步执行(即时反查, 抢关句柄窗口), 其余异步
+                            _try_find_and_store_proc(full, sync=(not _batch_sync_used))
+                            _batch_sync_used = True
                     if info.NextEntryOffset == 0:
                         break
                     offset += info.NextEntryOffset
@@ -13845,6 +14480,517 @@ def _run_file_monitor_mode():
                 state["ops"] = []
                 state["window_start"] = now
         time.sleep(0.2)
+
+
+
+# ===== SevenAgent isolated ETW host (single-file integration) =====
+class _SevenAgentHost:
+    PIPE = r"\\.\pipe\SevenAgentIPC"
+    _K32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    def __init__(self, parent):
+        self.parent = parent
+        self.proc = None
+        self.job = None
+        self.pipe = None
+        self._v2 = []
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self._serve, name='SevenAgentPipeHost', daemon=True)
+        # v3 additive: localhost fallback / pending chain / 2nd detection source (inlined)
+        self.tcp_thread = threading.Thread(target=self._tcp_serve, name='SevenAgentTcpHost', daemon=True)
+        self._tcp_sock = None
+        self._pending = {}
+        self._pending_lock = threading.Lock()
+        self._cmd_seen = {}
+        self._agent_cmd_rules = []
+        self._pipe_err = 0
+        self._load_agent_cmd_rules()
+
+    def start(self):
+        if not self.thread.is_alive():
+            self.thread.start()
+        if not self.tcp_thread.is_alive():
+            self.tcp_thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        k = self._K32
+        try:
+            if self.pipe:
+                k.CancelIoEx(self.pipe, None)
+                k.CloseHandle(self.pipe)
+                self.pipe = None
+        except Exception:
+            pass
+        try:
+            if self.job:
+                ctypes.windll.kernel32.CloseHandle(self.job)
+                self.job = None
+        except Exception:
+            pass
+        try:
+            if self._tcp_sock:
+                self._tcp_sock.close()
+                self._tcp_sock = None
+        except Exception:
+            pass
+
+    def _create_pipe(self):
+        k = self._K32
+        k.CreateNamedPipeW.restype = ctypes.c_void_p
+        h = k.CreateNamedPipeW(self.PIPE, 0x00000001, 0, 0xFF, 4096, 4096, 1000, None)  # 0xFF = PIPE_UNLIMITED_INSTANCES: fixes [Errno 231] ERROR_PIPE_BUSY
+        if h == ctypes.c_void_p(-1).value:
+            raise OSError(ctypes.get_last_error(), 'CreateNamedPipeW')
+        self.pipe = h
+        return h
+
+    def _start_agent(self):
+        path = os.path.join(BASE_DIR, 'SevenAgent', 'SevenAgent.exe')
+        rules = os.path.join(BASE_DIR, 'SevenAgent', 'agent_rules.json')
+        good = 0
+        bad = 0
+        self._v2 = []
+        try:
+            with open(rules, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for r in data.get('rules', []):
+                if isinstance(r, dict) and r.get('id') and r.get('kind') == 'ImageLoad' and r.get('action') == 'report_high_confidence':
+                    good += 1
+                elif isinstance(r, dict) and r.get('id') and r.get('kind') == 'ProcessCmdline' and r.get('behavior'):
+                    self._v2.append({'id': r['id'], 'behavior': r['behavior'], 'level': str(r.get('level', 'suspect')), 'score': int(r.get('score', 30))})
+                    good += 1
+                else:
+                    bad += 1
+            if not isinstance(data.get('rules'), list):
+                bad += 1
+        except Exception as e:
+            bad += 1
+            _log('[SevenAgent] rules load error: {}'.format(e))
+        _log('[SevenAgent] rules loaded={} abnormal={} v2={}'.format(good, bad, len(self._v2)))
+        if not os.path.isfile(path):
+            _log('[SevenAgent] startup failed: SevenAgent.exe missing')
+            return False
+        env = dict(os.environ)
+        env['SEVEN_PARENT_PID'] = str(os.getpid())
+        env['SEVEN_AGENT_RULES'] = rules
+        try:
+            self.proc = subprocess.Popen([path, '--Agent'], cwd=os.path.dirname(path), env=env,
+                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.PIPE,
+                                         creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            # v3 additive: C-side stderr used to be DEVNULL (rule-load failures, event counters
+            # and drop reasons were invisible). Pump it into the existing _log, no new file.
+            def _pump_agent_stderr(proc):
+                try:
+                    for _ln in iter(proc.stderr.readline, b''):
+                        _t = _ln.decode('utf-8', 'replace').rstrip()
+                        if _t:
+                            _log('[SevenAgent] ' + _t)
+                except Exception:
+                    pass
+            threading.Thread(target=_pump_agent_stderr, args=(self.proc,),
+                             name='SevenAgentStderr', daemon=True).start()
+            k = ctypes.windll.kernel32
+            self.job = k.CreateJobObjectW(None, None)
+            class _BASIC(ctypes.Structure):
+                _fields_ = [('PerProcessUserTimeLimit', ctypes.c_longlong), ('PerJobUserTimeLimit', ctypes.c_longlong),
+                            ('LimitFlags', wintypes.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t),
+                            ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wintypes.DWORD),
+                            ('Affinity', ctypes.c_size_t), ('PriorityClass', wintypes.DWORD), ('SchedulingClass', wintypes.DWORD)]
+            class _IO(ctypes.Structure):
+                _fields_ = [(x, ctypes.c_ulonglong) for x in ('ReadOperationCount','WriteOperationCount','OtherOperationCount','ReadTransferCount','WriteTransferCount','OtherTransferCount')]
+            class _EXT(ctypes.Structure):
+                _fields_ = [('BasicLimitInformation', _BASIC), ('IoInfo', _IO), ('ProcessMemoryLimit', ctypes.c_size_t),
+                            ('JobMemoryLimit', ctypes.c_size_t), ('PeakProcessMemoryUsed', ctypes.c_size_t), ('PeakJobMemoryUsed', ctypes.c_size_t)]
+            lim = _EXT(); lim.BasicLimitInformation.LimitFlags = 0x2000
+            if not k.SetInformationJobObject(self.job, 9, ctypes.byref(lim), ctypes.sizeof(lim)):
+                raise OSError(ctypes.get_last_error(), 'SetInformationJobObject')
+            if not k.AssignProcessToJobObject(self.job, wintypes.HANDLE(int(self.proc._handle))):
+                raise OSError(ctypes.get_last_error(), 'AssignProcessToJobObject')
+            try:
+                ppl = bool(_ppl_protect_pid(self.proc.pid))
+            except Exception as e:
+                ppl = False
+                _log('[SevenAgent] PPL exception: {}'.format(e))
+            _log('[SevenAgent] started={} pid={} PPL={}'.format(self.proc.poll() is None, self.proc.pid, 'OK' if ppl else 'FAILED'))
+            return True
+        except Exception as e:
+            _log('[SevenAgent] startup failed: {}'.format(e))
+            return False
+
+    def _serve(self):
+        k = self._K32
+        while not self.stop_event.is_set():
+            try:
+                h = self._create_pipe()
+                if not self.proc or self.proc.poll() is not None:
+                    if self.proc:
+                        _log('[SevenAgent] exited rc={}; restarting'.format(self.proc.returncode))
+                    if not self._start_agent():
+                        try:
+                            k.CloseHandle(h)
+                        except Exception:
+                            pass
+                        self.pipe = None
+                        time.sleep(2)
+                        continue
+                ok = k.ConnectNamedPipe(h, None)
+                if not ok and ctypes.get_last_error() != 535:
+                    raise OSError(ctypes.get_last_error(), 'ConnectNamedPipe')
+                pending = b''
+                buf = ctypes.create_string_buffer(4096)
+                while not self.stop_event.is_set():
+                    n = wintypes.DWORD()
+                    if not k.ReadFile(h, buf, len(buf), ctypes.byref(n), None) or not n.value:
+                        break
+                    pending += buf.raw[:n.value]
+                    while b'\n' in pending:
+                        line, pending = pending.split(b'\n', 1)
+                        self._message(line)
+                k.DisconnectNamedPipe(h); k.CloseHandle(h); self.pipe = None
+            except Exception as e:
+                try:
+                    if self.pipe:
+                        k.CloseHandle(self.pipe)
+                        self.pipe = None
+                except Exception:
+                    pass
+                if not self.stop_event.is_set():
+                    self._pipe_err += 1
+                    if self._pipe_err <= 2 or self._pipe_err % 30 == 0:
+                        _log('[SevenAgent] IPC abnormal: {} (n={})'.format(e, self._pipe_err))
+                time.sleep(min(1 + self._pipe_err // 10, 5))
+
+    # ===== v3 additive layer: localhost dual-channel / pending-chain / 2nd detection source =====
+    # All inlined into this single file. Nothing below removes or rewrites an existing path.
+    TCP_HOST = '127.0.0.1'
+    TCP_PORT = 47821
+    PEND_SCORE_TH = 50          # 异常 PID 的操作观察累计到此分数即整链终止
+
+    @staticmethod
+    def _chain_key(image):
+        """Must match SevenAgent.c make_key(): FNV-1a over UTF-16LE of lowercase basename."""
+        base = os.path.basename(image or '').lower()
+        h = 1469598103934665603
+        for b in base.encode('utf-16-le', 'replace'):
+            h ^= b
+            h = (h * 1099511628211) & 0xFFFFFFFFFFFFFFFF
+        return '{:08x}{:08x}'.format((h >> 32) & 0xFFFFFFFF, h & 0xFFFFFFFF)
+
+    def _tcp_serve(self):
+        """Fallback when the named pipe is busy/broken. Loopback only; same _message()."""
+        import socket
+        while not self.stop_event.is_set():
+            try:
+                srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                srv.bind((self.TCP_HOST, self.TCP_PORT))
+                srv.listen(8)
+                srv.settimeout(1.0)
+                self._tcp_sock = srv
+                _log('[SevenAgent] localhost fallback listening {}:{}'.format(self.TCP_HOST, self.TCP_PORT))
+                while not self.stop_event.is_set():
+                    try:
+                        conn, _addr = srv.accept()
+                    except socket.timeout:
+                        continue
+                    except OSError:
+                        break
+                    try:
+                        conn.settimeout(2.0)
+                        buf = b''
+                        while True:
+                            chunk = conn.recv(4096)
+                            if not chunk:
+                                break
+                            buf += chunk
+                            while b'\n' in buf:
+                                line, buf = buf.split(b'\n', 1)
+                                self._message(line)
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+            except Exception as e:
+                if not self.stop_event.is_set():
+                    _log('[SevenAgent] TCP listen abnormal: {}'.format(e))
+                self.stop_event.wait(2)
+            finally:
+                try:
+                    if self._tcp_sock:
+                        self._tcp_sock.close()
+                except Exception:
+                    pass
+                self._tcp_sock = None
+
+    def _load_agent_cmd_rules(self):
+        try:
+            p = os.path.join(BASE_DIR, 'SevenAgent', 'agent_rules.json')
+            with open(p, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            for r in data.get('rules', []):
+                if r.get('kind') != 'ProcessCmdline':
+                    continue
+                self._agent_cmd_rules.append({
+                    'id': str(r.get('id', '')), 'behavior': str(r.get('behavior', '')),
+                    'level': str(r.get('level', 'suspect')), 'score': int(r.get('score', 30)),
+                    'patterns': [(str(x.get('match', '')).upper(),
+                                  str(x.get('context', '') or '').upper(),
+                                  str(x.get('note', ''))) for x in r.get('patterns', [])]})
+            _log('[SevenAgent] cmd rules loaded={}'.format(len(self._agent_cmd_rules)))
+        except Exception as e:
+            _log('[SevenAgent] cmd rules load error: {}'.format(e))
+
+    def _observe_agent_signal(self, m, defer=False):
+        """PID not received / precursor: record; terminate once the score threshold is reached.
+        defer=True: caller performs the termination itself (avoids a double kill)."""
+        try:
+            key = str(m.get('chain_key', '')) or self._chain_key(str(m.get('module', '')) or '<none>')
+            fire, last_pid, image = False, 0, ''
+            with self._pending_lock:
+                e = self._pending.get(key)
+                if not e:
+                    e = {'hits': 0, 'sum': 0, 'first': time.time(),
+                         'rid': str(m.get('rule', '')), 'beh': str(m.get('behavior', '')),
+                         'cmd': str(m.get('cmd', ''))[:200], 'image': str(m.get('module', '')),
+                         'last_pid': int(m.get('pid', 0) or 0), 'fired': False}
+                    self._pending[key] = e
+                e['hits'] += 1
+                e['sum'] += int(m.get('score', 0) or 0)
+                if int(m.get('pid', 0) or 0):
+                    e['last_pid'] = int(m.get('pid', 0))
+                if len(self._pending) > 256:
+                    for k in list(self._pending)[:64]:
+                        self._pending.pop(k, None)
+                # 观察累计分 >= 50 且已拿到有效 PID -> 一次整链终止
+                if (not defer and e['sum'] >= self.PEND_SCORE_TH
+                        and e['last_pid'] > 0 and not e['fired']):
+                    e['fired'] = True
+                    fire, last_pid, image = True, e['last_pid'], e['image']
+                hits, total = e['hits'], e['sum']
+            _log('[SevenAgent][OBSERVE] key={} hits={} sum={} th={} rule={}'.format(
+                key, hits, total, self.PEND_SCORE_TH, e['rid']))
+            if fire:
+                _ch = self._agent_terminate(last_pid, image)
+                self._agent_finish(last_pid, image,
+                                   'Agent.ObserveScore>={} key={}'.format(self.PEND_SCORE_TH, key), _ch)
+            return e
+        except Exception as e:
+            _log('[SevenAgent][OBSERVE] error: {}'.format(e))
+            return None
+
+    def _link_pending(self, key, pid, image=''):
+        """A later behaviour + a known precursor (or a threat-tagged image) -> link and kill once."""
+        try:
+            with self._pending_lock:
+                e = self._pending.get(key)
+                if not e or e['fired']:
+                    return False
+                tagged = _is_threat_tagged(image) or _is_threat_tagged(e.get('image', ''))
+                score_hit = e['sum'] >= self.PEND_SCORE_TH
+                if e['hits'] < 2 and not tagged and not score_hit:
+                    return False
+                e['fired'] = True
+                hits, total = e['hits'], e['sum']
+            _log('[SevenAgent][CHAIN] link key={} hits={} sum={} th={} score_hit={} tagged={} -> terminate PID={}'.format(
+                key, hits, total, self.PEND_SCORE_TH, score_hit, tagged, pid))
+            return True
+        except Exception as e:
+            _log('[SevenAgent][CHAIN] error: {}'.format(e))
+            return False
+
+    def _agent_finish(self, pid, path, reason, chain):
+        """统一收口: 实际终止的 PID 列表同时写日志与托盘通知(Threat Blocked)。"""
+        try:
+            pids = []
+            for t in (chain or []):
+                try:
+                    pids.append(int(t[1]))
+                except Exception:
+                    pass
+            if pid and int(pid) not in pids:
+                pids.insert(0, int(pid))
+            text = ','.join(str(x) for x in pids) if pids else str(pid)
+            _log('[SevenAgent][BLOCK] {} PID={} terminated_pids=[{}] chain={}'.format(
+                reason, pid, text, len(chain or [])))
+            _notify('Threat Blocked',
+                    '{} | PID {} | terminated PIDs: {}'.format(reason, pid, text),
+                    pid=int(pid or 0), name=os.path.basename(path or '') or 'unknown', path=path or '')
+            return pids
+        except Exception as e:
+            _log('[SevenAgent][BLOCK] report error: {}'.format(e))
+            return []
+
+    def _agent_terminate(self, pid, path):
+        """SevenAgent channel exception: does NOT consult DefenseMode, kills the whole chain."""
+        rm = getattr(self.parent, '_realtime_monitor', None)
+        if not rm:
+            return []
+        try:
+            return rm._terminate_chain(int(pid), os.path.basename(path or '') or 'unknown',
+                                       path or '', full=True)
+        except Exception as e:
+            _log('[SevenAgent][TERMINATE] error: {}'.format(e))
+            return []
+
+    def match_cmdline(self, pid, name, path, cmdline, ppid=0):
+        """2nd detection source: full cmdline from light telemetry x agent_rules.json."""
+        try:
+            if not self._agent_cmd_rules or not cmdline:
+                return
+            pid = int(pid or 0)
+            if pid <= 0:
+                return
+            now = time.time()
+            if now - self._cmd_seen.get(pid, 0) < 60:
+                return
+            self._cmd_seen[pid] = now
+            if len(self._cmd_seen) > 2000:
+                self._cmd_seen = {k: v for k, v in self._cmd_seen.items() if now - v < 300}
+            h = os.path.normcase(path or '')
+            if ('\\sevenagent\\' in h or '\\sevenendpointsecurity\\' in h
+                    or h.endswith('\\sevenendpoint.exe')):
+                return
+            up = cmdline.upper()
+            key = self._chain_key(path or name)
+            for r in self._agent_cmd_rules:
+                for match, ctx, note in r['patterns']:
+                    if not match or match not in up or (ctx and ctx not in up):
+                        continue
+                    sig = {'pid': pid, 'rule': r['id'], 'behavior': r['behavior'],
+                           'detail': note, 'score': r['score'],
+                           'action': 'terminate' if r['level'] == 'malicious' else 'observe',
+                           'module': path or '', 'cmd': cmdline[:200],
+                           'family': 'PendingChain', 'chain_key': key, 'linked': 0}
+                    self._observe_agent_signal(sig, defer=(r['level'] == 'malicious'))
+                    if r['level'] == 'malicious':
+                        chain = self._agent_terminate(pid, path)
+                        self._agent_finish(pid, path, 'Agent.Telemetry.' + r['id'], chain)
+                        _log('[SevenAgent][TELEMETRY][BLOCK] {} PID={} cmd={} chain={}'.format(
+                            r['id'], pid, cmdline[:80], len(chain)))
+                        _record_interception('MainGuard:Agent', name or 'unknown', path or '',
+                                             threat_type=r['behavior'], confidence=90,
+                                             engine='SevenAgent-Telemetry',
+                                             action='terminated' if chain else 'reported',
+                                             extra='rule={} detail={} PID:{}'.format(r['id'], note, pid))
+                    return
+        except Exception as e:
+            _log('[SevenAgent][TELEMETRY] error: {}'.format(e))
+    # ===== end v3 additive layer =====
+
+    def _message(self, raw):
+        try:
+            try:
+                m = json.loads(raw.decode('ascii', 'strict'))
+            except UnicodeDecodeError:
+                m = json.loads(raw.decode('utf-8', 'replace'))
+            pid = int(m.get('pid', 0)); module = str(m.get('module', ''))
+            rule = str(m.get('rule', '')); behavior = str(m.get('behavior', ''))
+            family = str(m.get('family', 'Generic'))
+            # v3 additive: PID not received -> silently record, no termination (conservative)
+            if pid <= 0:
+                self._observe_agent_signal(m)
+                return
+            # v3 additive: precursor = observe; a later behaviour links the chain and kills once
+            if family == 'PendingChain':
+                self._observe_agent_signal(
+                    m, defer=(str(m.get('action', 'report')) == 'terminate'))
+                if str(m.get('action', 'report')) == 'terminate' and self._link_pending(
+                        str(m.get('chain_key', '')), pid, module):
+                    _ch = self._agent_terminate(pid, module)
+                    self._agent_finish(pid, module, 'Agent.Chain.' + rule, _ch)
+                    _log('[SevenAgent][CHAIN][BLOCK] key={} PID={} chain={}'.format(
+                        m.get('chain_key', ''), pid, len(_ch)))
+                    _record_interception('MainGuard:Agent', os.path.basename(module) or 'unknown', module,
+                                         threat_type=str(m.get('behavior', 'PendingChain')),
+                                         confidence=90, engine='SevenAgent-ETW',
+                                         action='terminated' if _ch else 'reported',
+                                         extra='rule={} linked={} PID:{}'.format(
+                                             rule, m.get('linked', 0), pid))
+                return
+            if rule == 'Agent.HighConfidence.SideloadChain':
+                if behavior != 'ImageLoad.SuspiciousSideload': raise ValueError('behavior rejected')
+                if not self._eligible(pid, module): raise ValueError('mutual exemption or path policy')
+                path = self._image(pid)
+                reason = 'MainGuard:Behavior.SuspiciousSideload.' + (family if family in ('SilverFox','Generic') else 'Generic')
+                rm = getattr(self.parent, '_realtime_monitor', None)
+                chain = rm._terminate_chain(pid, os.path.basename(path), path, full=True) if rm else []
+                self._agent_finish(pid, path, reason, chain)
+                _log('[SevenAgent][ETW][BLOCK] {} PID={} module={} chain={}'.format(reason, pid, module, len(chain)))
+                _record_interception('MainGuard:Behavior', os.path.basename(path), path, threat_type=reason,
+                                     confidence=95, engine='SevenAgent-ETW',
+                                     action='terminated' if chain else 'reported',
+                                     extra='rule={} behavior={} family={} module={} PID:{}'.format(rule, behavior, family, module, pid))
+                _edr_add_event(pid, os.path.basename(path), path, 'ioa', 25, reason + ' ' + behavior)
+                _edr_report_chain(pid, os.path.basename(path), path, [(reason, 25), (behavior, 0)],
+                                  action='terminated' if chain else 'reported')
+                return
+            v2 = None
+            for v in self._v2:
+                if v['id'] == rule:
+                    v2 = v
+                    break
+            if not v2: raise ValueError('rule not declared in agent_rules.json')
+            if behavior != v2['behavior']: raise ValueError('behavior rejected')
+            host = self._image(pid)
+            h = os.path.normcase(host)
+            if not host or ('\\sevenagent\\' in h or '\\sevenendpointsecurity\\' in h or h.endswith('\\sevenendpoint.exe')):
+                raise ValueError('mutual exemption')
+            detail = str(m.get('detail', ''))
+            score = int(m.get('score', v2['score']))
+            action = str(m.get('action', 'report'))
+            terminate = (v2['level'] == 'malicious' and action == 'terminate') or score >= 100
+            reason = 'MainGuard:Agent.' + v2['id'].rsplit('.', 1)[-1]
+            rm = getattr(self.parent, '_realtime_monitor', None)
+            # DefenseMode channel exception (confirmed 2026-11-14): SevenAgent ETW alerts are
+            # main-guard behaviour interception, NOT gated by "process interception disabled".
+            # DefenseMode semantics for every other path stay exactly as they were.
+            chain = self._agent_terminate(pid, host) if terminate else []
+            if terminate:
+                self._agent_finish(pid, host, reason, chain)
+            _log('[SevenAgent][ETW][{}] {} PID={} score={} chain={}'.format('BLOCK' if terminate else 'REPORT', reason, pid, score, len(chain)))
+            _record_interception('MainGuard:Agent', os.path.basename(host), host, threat_type=behavior,
+                                 confidence=90, engine='SevenAgent-ETW',
+                                 action='terminated' if chain else 'reported',
+                                 extra='rule={} detail={} score={} PID:{}'.format(rule, detail, score, pid))
+            _edr_add_event(pid, os.path.basename(host), host, 'ioa', min(score, 40) if not terminate else 40, reason + ' ' + detail)
+            if terminate:
+                _edr_report_chain(pid, os.path.basename(host), host, [(reason, 40), (behavior, 0)], action='terminated')
+        except Exception as e:
+            _log('[SevenAgent][REJECT] {}'.format(e))
+
+    @staticmethod
+    def _image(pid):
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+        if not h: return ''
+        b = ctypes.create_unicode_buffer(32768); n = wintypes.DWORD(len(b))
+        try:
+            return b.value if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, b, ctypes.byref(n)) else ''
+        finally: ctypes.windll.kernel32.CloseHandle(h)
+
+    @classmethod
+    def _eligible(cls, pid, module):
+        host = cls._image(pid)
+        h = os.path.normcase(host); m = os.path.normcase(module)
+        if ('\\sevenagent\\' in h or '\\sevenendpointsecurity\\' in h or h.endswith('\\sevenendpoint.exe')): return False
+        if not any(x in m for x in ('\\appdata\\','\\temp\\','\\downloads\\','\\users\\public\\','\\programdata\\')): return False
+        if os.path.basename(m).lower() not in {'version.dll','winmm.dll','dbghelp.dll','dxgi.dll','d3d9.dll','d3d11.dll','winhttp.dll','wintrust.dll','usp10.dll'}: return False
+        return os.path.basename(h).lower() in {'rundll32.exe','regsvr32.exe','mshta.exe','installutil.exe','control.exe'}
+
+_g_seven_agent = None
+
+def _start_seven_agent(parent):
+    global _g_seven_agent
+    if _g_seven_agent is None:
+        _g_seven_agent = _SevenAgentHost(parent)
+    _g_seven_agent.start()
+
+def _stop_seven_agent():
+    if _g_seven_agent is not None:
+        _g_seven_agent.stop()
+# ===== end SevenAgent host =====
 
 
 if __name__ == '__main__':
